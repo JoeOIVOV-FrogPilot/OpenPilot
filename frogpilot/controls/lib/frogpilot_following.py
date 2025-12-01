@@ -3,6 +3,16 @@ import numpy as np
 
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import COMFORT_BRAKE, LEAD_DANGER_FACTOR, STOP_DISTANCE, desired_follow_distance, get_jerk_factor, get_T_FOLLOW
 
+from openpilot.frogpilot.common.frogpilot_variables import CITY_SPEED_LIMIT
+
+TRAFFIC_JERK_BP =           [0.0,  CITY_SPEED_LIMIT]
+TRAFFIC_ACCELERATION_JERK = [0.50, 0.50]
+TRAFFIC_DANGER_JERK =       [1.00, 1.00]
+TRAFFIC_SPEED_JERK =        [0.50, 0.50]
+
+TRAFFIC_FOLLOW_BP = [0.0,  CITY_SPEED_LIMIT]
+TRAFFIC_FOLLOW =    [0.50, 1.00]
+
 class FrogPilotFollowing:
   def __init__(self, FrogPilotPlanner):
     self.frogpilot_planner = FrogPilotPlanner
@@ -16,7 +26,12 @@ class FrogPilotFollowing:
     self.t_follow = 0
 
   def update(self, long_control_active, v_ego, sm, frogpilot_toggles):
-    if long_control_active:
+    if long_control_active and sm["frogpilotCarState"].trafficModeEnabled:
+      self.base_acceleration_jerk = float(np.interp(v_ego, TRAFFIC_JERK_BP, TRAFFIC_ACCELERATION_JERK))
+      self.base_danger_jerk = float(np.interp(v_ego, TRAFFIC_JERK_BP, TRAFFIC_DANGER_JERK))
+      self.base_speed_jerk = float(np.interp(v_ego, TRAFFIC_JERK_BP, TRAFFIC_SPEED_JERK))
+      self.t_follow = float(np.interp(v_ego, TRAFFIC_FOLLOW_BP, TRAFFIC_FOLLOW))
+    elif long_control_active:
       if sm["carState"].aEgo >= 0:
         self.base_acceleration_jerk, self.base_danger_jerk, self.base_speed_jerk = get_jerk_factor(
           frogpilot_toggles.aggressive_jerk_acceleration, frogpilot_toggles.aggressive_jerk_danger, frogpilot_toggles.aggressive_jerk_speed,
@@ -52,7 +67,7 @@ class FrogPilotFollowing:
     self.following_lead = self.frogpilot_planner.tracking_lead and self.frogpilot_planner.lead_one.dRel < (self.t_follow * 2) * v_ego
 
     if long_control_active and self.frogpilot_planner.tracking_lead:
-      if frogpilot_toggles.human_following:
+      if not self.frogpilot_planner.traffic_mode_active and frogpilot_toggles.human_following:
         self.update_follow_values(self.frogpilot_planner.lead_one.dRel, v_ego, self.frogpilot_planner.lead_one.vLead)
       self.desired_follow_distance = desired_follow_distance(v_ego, self.frogpilot_planner.lead_one.vLead, self.t_follow)
     else:
