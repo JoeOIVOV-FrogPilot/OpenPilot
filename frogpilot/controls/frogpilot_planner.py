@@ -137,6 +137,7 @@ class FrogPilotPlanner:
     frogpilotPlan.dangerJerk = float(DANGER_ZONE_COST * self.frogpilot_following.danger_jerk)
     frogpilotPlan.speedJerk = float(J_EGO_COST * self.frogpilot_following.speed_jerk)
     frogpilotPlan.tFollow = float(self.frogpilot_following.t_follow)
+    frogpilotPlan.trackingLead = self.tracking_lead
 
     frogpilotPlan.cscControllingSpeed = self.frogpilot_vcruise.csc_controlling_speed
     frogpilotPlan.cscSpeed = float(self.frogpilot_vcruise.csc_target)
