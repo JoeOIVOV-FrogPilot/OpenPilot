@@ -155,7 +155,7 @@ class LongitudinalPlanner:
 
     self.mpc.set_weights(sm['frogpilotPlan'].accelerationJerk, sm['frogpilotPlan'].dangerJerk, sm['frogpilotPlan'].speedJerk, prev_accel_constraint, personality=sm['selfdriveState'].personality)
     self.mpc.set_cur_state(self.v_desired_filter.x, self.a_desired)
-    self.mpc.update(sm['radarState'], v_cruise, x, v, a, j, sm['frogpilotPlan'].dangerFactor, sm['frogpilotPlan'].tFollow, personality=sm['selfdriveState'].personality)
+    self.mpc.update(sm['radarState'], v_cruise, x, v, a, j, sm['frogpilotPlan'].dangerFactor, sm['frogpilotPlan'].tFollow, accel_clip[0], accel_clip[1], personality=sm['selfdriveState'].personality)
 
     self.v_desired_trajectory = np.interp(CONTROL_N_T_IDX, T_IDXS_MPC, self.mpc.v_solution)
     self.a_desired_trajectory = np.interp(CONTROL_N_T_IDX, T_IDXS_MPC, self.mpc.a_solution)
