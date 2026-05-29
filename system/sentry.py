@@ -16,9 +16,9 @@ from openpilot.frogpilot.common.frogpilot_variables import ERROR_LOGS_PATH
 
 class SentryProject(Enum):
   # python project
-  SELFDRIVE = "https://6f3c7076c1e14b2aa10f5dde6dda0cc4@o33823.ingest.sentry.io/77924"
+  SELFDRIVE = "https://7ba43fba4cfcf1a6c0eff83d40374e43@o4505034923769856.ingest.us.sentry.io/4505034930651136"
   # native project
-  SELFDRIVE_NATIVE = "https://3e4b586ed21a4479ad5d85083b639bc6@o33823.ingest.sentry.io/157615"
+  SELFDRIVE_NATIVE = "https://7ba43fba4cfcf1a6c0eff83d40374e43@o4505034923769856.ingest.us.sentry.io/4505034930651136"
 
 
 def report_tombstone(fn: str, message: str, contents: str) -> None:
@@ -72,7 +72,7 @@ def init(project: SentryProject) -> bool:
   build_metadata = get_build_metadata()
   # forks like to mess with this, so double check
   FrogPilot = "frogai" in build_metadata.openpilot.git_origin.lower()
-  if not FrogPilot or PC:
+  if not FrogPilot or build_metadata.openpilot.is_dirty or PC:
     return False
 
   short_branch = build_metadata.channel
@@ -85,7 +85,7 @@ def init(project: SentryProject) -> bool:
     env = "Release"
   elif short_branch == "FrogPilot-Testing":
     env = "Testing"
-  elif build_metadata.tested_channel:
+  elif short_branch == "FrogPilot-Staging":
     env = "Staging"
   else:
     env = short_branch
@@ -109,5 +109,6 @@ def init(project: SentryProject) -> bool:
   sentry_sdk.set_tag("branch", short_branch)
   sentry_sdk.set_tag("commit", build_metadata.openpilot.git_commit)
   sentry_sdk.set_tag("updated", params.get("Updated"))
+  sentry_sdk.set_tag("installed", params.get("InstallDate"))
 
   return True

@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 from cereal import messaging
+from openpilot.common.api import get_key_pair
 from openpilot.common.basedir import BASEDIR
 from openpilot.common.params import Params
 from openpilot.common.time_helpers import system_time_valid
@@ -27,7 +28,7 @@ def capture_report(discord_user, report, params, frogpilot_toggles):
   if not is_url_pingable(FROGPILOT_API):
     return
 
-  api_token, build_metadata, device_type, dongle_id = get_frogpilot_api_info()
+  api_token, build_metadata, device_type, dongle_id, *_ = get_frogpilot_api_info()
 
   error_file_path = ERROR_LOGS_PATH / "error.txt"
   error_content = "No error log found."
@@ -119,12 +120,13 @@ def register_device(build_metadata, params):
     while not is_url_pingable(FROGPILOT_API):
       time.sleep(60)
 
+    _, _, public_key = get_key_pair()
     payload = {
-      "api_token": params.get("FrogPilotApiToken"),
       "build_metadata": dataclasses.asdict(build_metadata),
       "device": HARDWARE.get_device_type(),
+      "device_public_key": public_key,
       "dongle_id": params.get("DongleId"),
-      "frogpilot_dongle_id": params.get("FrogPilotDongleId"),
+      "os_version": HARDWARE.get_os_version(),
     }
 
     try:
@@ -132,10 +134,13 @@ def register_device(build_metadata, params):
       response.raise_for_status()
 
       data = response.json()
+      print(f"Device registration successful: dongle_id={data.get('frogpilot_dongle_id', '')[:8]}..., token={'set' if data.get('api_token') else 'empty'}")
       params.put("FrogPilotApiToken", data.get("api_token", ""))
       params.put("FrogPilotDongleId", data.get("frogpilot_dongle_id"))
-    except Exception:
-      pass
+    except Exception as e:
+      print(f"Device registration failed: {e}")
+      if hasattr(e, 'response') and e.response is not None:
+        print(f"  Status: {e.response.status_code}, Body: {e.response.text[:200]}")
 
   threading.Thread(target=register_thread, daemon=True).start()
 
@@ -154,7 +159,7 @@ def update_boot_logo(frogpilot=False, stock=False):
   elif stock:
     target_logo = Path(BASEDIR) / "frogpilot/assets/other_images/stock_bg.jpg"
   else:
-    print(f'Error: Must specify either "frogpilot=True" or "stock=True"')
+    print('Error: Must specify either "frogpilot=True" or "stock=True"')
     return
 
   if not target_logo.is_file():

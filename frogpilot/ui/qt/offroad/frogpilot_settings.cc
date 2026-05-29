@@ -249,6 +249,8 @@ void FrogPilotSettingsWindow::updateTuningLevel() {
 }
 
 void FrogPilotSettingsWindow::showEvent(QShowEvent *event) {
+  updateTuningLevel();
+
   static bool alertShown = false;
 
   QString className = this->metaObject()->className();

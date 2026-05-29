@@ -52,8 +52,7 @@ class ConditionalExperimentalMode:
       self.stop_light_filter.x = 0
 
   def check_conditions(self, v_ego, sm, frogpilot_toggles):
-    curve_allowed = not self.frogpilot_planner.frogpilot_following.following_lead or frogpilot_toggles.conditional_curves_lead
-    if self.curve_detected and curve_allowed and frogpilot_toggles.conditional_curves:
+    if self.curve_detected and (not self.frogpilot_planner.frogpilot_following.following_lead or frogpilot_toggles.conditional_curves_lead) and frogpilot_toggles.conditional_curves:
       self.status_value = CEStatus["CURVATURE"]
       return True
 
@@ -67,11 +66,7 @@ class ConditionalExperimentalMode:
         self.status_value = CEStatus["SIGNAL"]
         return True
 
-    if self.frogpilot_planner.frogpilot_following.following_lead:
-      conditional_limit = frogpilot_toggles.conditional_limit_lead
-    else:
-      conditional_limit = frogpilot_toggles.conditional_limit
-    if 1 <= v_ego < conditional_limit:
+    if 1 <= v_ego < (frogpilot_toggles.conditional_limit_lead if self.frogpilot_planner.frogpilot_following.following_lead else frogpilot_toggles.conditional_limit):
       self.status_value = CEStatus["SPEED"]
       return True
 
@@ -115,13 +110,13 @@ class ConditionalExperimentalMode:
         predicted_stopped_lead = False
 
       self.slow_lead_filter.update(slower_lead or stopped_lead or predicted_slower_lead or predicted_stopped_lead)
+      self.slow_lead_detected = self.slow_lead_filter.x >= THRESHOLD
     else:
-      self.slow_lead_filter.update(False)
-
-    self.slow_lead_detected = self.slow_lead_filter.x >= THRESHOLD
+      self.slow_lead_filter.x = 0
+      self.slow_lead_detected = False
 
   def stop_sign_and_light(self, v_ego, sm, model_time):
-    slow_hint_window = [sm["modelV2"].velocity.x[index] for index, time_index in enumerate(ModelConstants.T_IDXS) if time_index > model_time]
+    slow_hint_window = [velocity for time_index, velocity in zip(ModelConstants.T_IDXS, sm["modelV2"].velocity.x) if time_index > model_time]
     slow_hint_detected = any(velocity <= SLOWDOWN_PERCENTAGE * v_ego for velocity in slow_hint_window) and not self.curve_detected
     stop_time_detected = self.frogpilot_planner.model_length < v_ego * model_time
 

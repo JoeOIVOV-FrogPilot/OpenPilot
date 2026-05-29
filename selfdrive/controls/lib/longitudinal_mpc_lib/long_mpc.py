@@ -3,12 +3,11 @@ import os
 import time
 import numpy as np
 from cereal import log
-from opendbc.car.interfaces import ACCEL_MIN, ACCEL_MAX
+from opendbc.car.interfaces import ACCEL_MIN
 from openpilot.common.realtime import DT_MDL
 from openpilot.common.swaglog import cloudlog
 # WARNING: imports outside of constants will not trigger a rebuild
 from openpilot.selfdrive.modeld.constants import index_function, ModelConstants
-from openpilot.selfdrive.controls.radard import _LEAD_ACCEL_TAU
 
 LEAD_T_IDXS_MODEL = np.array(ModelConstants.LEAD_T_IDXS)  # [0, 2, 4, 6, 8, 10]s
 
@@ -44,6 +43,8 @@ CRASH_DISTANCE = .25
 LEAD_DANGER_FACTOR = 0.75
 LIMIT_COST = 1e6
 ACADOS_SOLVER_TYPE = 'SQP_RTI'
+# Default lead acceleration decay set to 50% at 1s
+LEAD_ACCEL_TAU = 1.5
 
 
 # Fewer timestamps don't hurt performance and lead to
@@ -58,7 +59,7 @@ T_DIFFS = np.diff(T_IDXS, prepend=[0.])
 COMFORT_BRAKE = 2.5
 STOP_DISTANCE = 6.0
 CRUISE_MIN_ACCEL = -1.2
-CRUISE_MAX_ACCEL = 2.0
+CRUISE_MAX_ACCEL = 1.6
 MIN_X_LEAD_FACTOR = 0.5
 
 def get_jerk_factor(aggressive_jerk_acceleration=0.5, aggressive_jerk_danger=0.5, aggressive_jerk_speed=0.5,
@@ -364,7 +365,7 @@ class LongitudinalMpc:
       x_lead = 50.0
       v_lead = v_ego + 10.0
       a_lead = 0.0
-      a_lead_tau = _LEAD_ACCEL_TAU
+      a_lead_tau = LEAD_ACCEL_TAU
 
     # MPC will not converge if immediate crash is expected
     # Clip lead distance to what is still possible to brake for
@@ -374,7 +375,7 @@ class LongitudinalMpc:
     a_lead = np.clip(a_lead, -10., 5.)
     return self.extrapolate_lead(x_lead, v_lead, a_lead, a_lead_tau)
 
-  def update(self, v_cruise, modelV2, radarstate, x, v, a, j, danger_factor, t_follow, accel_min, accel_max, frogpilot_toggles, traffic_mode_active, personality=log.LongitudinalPersonality.standard):
+  def update(self, v_cruise, modelV2, radarstate, x, v, a, j, t_follow, accel_min, accel_max, frogpilot_toggles, traffic_mode_active, personality=log.LongitudinalPersonality.standard):
     v_ego = self.x0[1]
     model_leads = modelV2.leadsV3
     self.status = model_leads[0].prob > frogpilot_toggles.lead_detection_probability or model_leads[1].prob > frogpilot_toggles.lead_detection_probability
@@ -395,7 +396,7 @@ class LongitudinalMpc:
 
     # Update in ACC mode or ACC/e2e blend
     if self.mode == 'acc':
-      self.params[:,5] = danger_factor
+      self.params[:,5] = LEAD_DANGER_FACTOR
 
       # Fake an obstacle for cruise, this ensures smooth acceleration to set speed
       # when the leads are no factor.

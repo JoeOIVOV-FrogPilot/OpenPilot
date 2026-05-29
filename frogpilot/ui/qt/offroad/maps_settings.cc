@@ -207,7 +207,7 @@ void FrogPilotMapsPanel::cancelDownload() {
   params_memory.putBool("CancelDownloadMaps", true);
   params_memory.remove("DownloadMaps");
 
-  QTimer::singleShot(2500, [this]() {
+  QTimer::singleShot(2500, this, [this]() {
     cancellingDownload = false;
 
     downloadMapsButton->setEnabled(true);

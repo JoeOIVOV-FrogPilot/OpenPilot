@@ -12,6 +12,7 @@ import zipfile
 
 from functools import cache
 from pathlib import Path
+from typing import NamedTuple
 
 import openpilot.system.sentry as sentry
 
@@ -24,7 +25,7 @@ from openpilot.system.hardware import HARDWARE
 from openpilot.system.version import get_build_metadata
 from panda import Panda
 
-from openpilot.frogpilot.common.frogpilot_variables import EARTH_RADIUS, FROGPILOT_API, FROGS_GO_MOO_PATH, KONIK_PATH
+from openpilot.frogpilot.common.frogpilot_variables import EARTH_RADIUS, FROGS_GO_MOO_PATH, KONIK_PATH
 
 class ThreadManager:
   def __init__(self):
@@ -73,7 +74,7 @@ def calculate_bearing_offset(latitude, longitude, current_bearing, distance):
 
   new_lat = math.asin(math.sin(lat_rad) * math.cos(delta) + math.cos(lat_rad) * math.sin(delta) * math.cos(bearing))
   new_lon = lon_rad + math.atan2(math.sin(bearing) * math.sin(delta) * math.cos(lat_rad),  math.cos(delta) - math.sin(lat_rad) * math.sin(new_lat))
-  return math.degrees(new_lat), math.degrees(new_lon)
+  return math.degrees(new_lat), ((math.degrees(new_lon) + 540) % 360) - 180
 
 
 def calculate_distance_to_point(lat1, lon1, lat2, lon2):
@@ -86,6 +87,7 @@ def calculate_distance_to_point(lat1, lon1, lat2, lon2):
   delta_lon = lon2_rad - lon1_rad
 
   a = (math.sin(delta_lat / 2) ** 2) + math.cos(lat1_rad) * math.cos(lat2_rad) * (math.sin(delta_lon / 2) ** 2)
+  a = min(1, max(0, a))
   c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
   return EARTH_RADIUS * c
@@ -149,12 +151,16 @@ def delete_file(path, print_error=True, report=True):
 
 
 def extract_zip(zip_file, extract_path):
+  extract_root = Path(extract_path).resolve()
   with zipfile.ZipFile(zip_file, "r") as zip:
     print(f"Extracting {zip_file} to {extract_path}")
+    for member in zip.namelist():
+      if not (extract_root / member).resolve().is_relative_to(extract_root):
+        raise ValueError(f"Refusing to extract path outside destination: {member}")
     zip.extractall(extract_path)
 
   zip_file.unlink()
-  print(f"Extraction completed!")
+  print("Extraction completed!")
 
 
 def flash_panda(params_memory):
@@ -170,6 +176,14 @@ def flash_panda(params_memory):
   params_memory.remove("FlashPanda")
 
 
+class FrogPilotApiInfo(NamedTuple):
+  api_token: str
+  build_metadata: dict
+  device_type: str
+  dongle_id: str
+  os_version: str
+
+
 def get_frogpilot_api_info():
   params = Params()
 
@@ -177,8 +191,9 @@ def get_frogpilot_api_info():
   build_metadata = dataclasses.asdict(get_build_metadata())
   device_type = HARDWARE.get_device_type()
   dongle_id = params.get("FrogPilotDongleId")
+  os_version = HARDWARE.get_os_version()
 
-  return api_token, build_metadata, device_type, dongle_id
+  return FrogPilotApiInfo(api_token, build_metadata, device_type, dongle_id, os_version)
 
 
 def get_lock_status(can_parser, can_sock):
@@ -195,18 +210,17 @@ def is_url_pingable(url):
   if not url:
     return False
 
-  if not hasattr(is_url_pingable, "session"):
-    is_url_pingable.session = requests.Session()
-    is_url_pingable.session.headers.update({"User-Agent": "frogpilot-ping-test/1.0 (https://github.com/FrogAi/FrogPilot)"})
-
+  headers = {"User-Agent": "frogpilot-ping-test/1.0 (https://github.com/FrogAi/FrogPilot)"}
   try:
-    response = is_url_pingable.session.head(url, timeout=10, allow_redirects=True)
-    if response.status_code in (405, 501):
-      response = is_url_pingable.session.get(url, timeout=10, allow_redirects=True, stream=True)
+    response = requests.head(url, headers=headers, timeout=10, allow_redirects=True)
+    try:
+      if response.status_code in (405, 501):
+        response.close()
+        response = requests.get(url, headers=headers, timeout=10, allow_redirects=True, stream=True)
 
-    is_accessible = response.ok
-    response.close()
-    return is_accessible
+      return response.ok
+    finally:
+      response.close()
 
   except (requests.exceptions.ConnectionError, requests.exceptions.SSLError):
     return False
@@ -219,14 +233,22 @@ def is_url_pingable(url):
 
 
 def load_json_file(path):
-  if path.is_file():
-    try:
-      with open(path) as file:
-        return json.load(file)
-    except json.JSONDecodeError:
-      print(f"Failed to load JSON file: {path}")
-      return {}
-  return {}
+  path = Path(path)
+  if not path.is_file():
+    return {}
+
+  try:
+    with open(path) as file:
+      data = json.load(file)
+  except (OSError, json.JSONDecodeError):
+    print(f"Failed to load JSON file: {path}")
+    return {}
+
+  if not isinstance(data, dict):
+    print(f"Failed to load JSON file: {path}")
+    return {}
+
+  return data
 
 
 def lock_doors(lock_doors_timer, sm, params):

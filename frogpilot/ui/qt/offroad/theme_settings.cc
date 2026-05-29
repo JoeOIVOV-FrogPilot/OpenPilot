@@ -264,7 +264,7 @@ FrogPilotThemesPanel::FrogPilotThemesPanel(FrogPilotSettingsWindow *parent, bool
 
             params_memory.putBool("CancelThemeDownload", true);
 
-            QTimer::singleShot(2500, [this]() {
+            QTimer::singleShot(2500, this, [this]() {
               cancellingDownload = false;
               colorDownloading = false;
               themeDownloading = false;
@@ -316,7 +316,7 @@ FrogPilotThemesPanel::FrogPilotThemesPanel(FrogPilotSettingsWindow *parent, bool
 
             params_memory.putBool("CancelThemeDownload", true);
 
-            QTimer::singleShot(2500, [this]() {
+            QTimer::singleShot(2500, this, [this]() {
               cancellingDownload = false;
               distanceIconDownloading = false;
               themeDownloading = false;
@@ -368,7 +368,7 @@ FrogPilotThemesPanel::FrogPilotThemesPanel(FrogPilotSettingsWindow *parent, bool
 
             params_memory.putBool("CancelThemeDownload", true);
 
-            QTimer::singleShot(2500, [this]() {
+            QTimer::singleShot(2500, this, [this]() {
               cancellingDownload = false;
               iconDownloading = false;
               themeDownloading = false;
@@ -420,7 +420,7 @@ FrogPilotThemesPanel::FrogPilotThemesPanel(FrogPilotSettingsWindow *parent, bool
 
             params_memory.putBool("CancelThemeDownload", true);
 
-            QTimer::singleShot(2500, [this]() {
+            QTimer::singleShot(2500, this, [this]() {
               cancellingDownload = false;
               signalDownloading = false;
               themeDownloading = false;
@@ -472,7 +472,7 @@ FrogPilotThemesPanel::FrogPilotThemesPanel(FrogPilotSettingsWindow *parent, bool
 
             params_memory.putBool("CancelThemeDownload", true);
 
-            QTimer::singleShot(2500, [this]() {
+            QTimer::singleShot(2500, this, [this]() {
               cancellingDownload = false;
               soundDownloading = false;
               themeDownloading = false;
@@ -524,7 +524,7 @@ FrogPilotThemesPanel::FrogPilotThemesPanel(FrogPilotSettingsWindow *parent, bool
 
             params_memory.putBool("CancelThemeDownload", true);
 
-            QTimer::singleShot(2500, [this]() {
+            QTimer::singleShot(2500, this, [this]() {
               cancellingDownload = false;
               wheelDownloading = false;
               themeDownloading = false;
@@ -773,7 +773,7 @@ void FrogPilotThemesPanel::updateState(const UIState &s, const FrogPilotUIState 
     if (progress == "Downloaded!" || downloadFailed) {
       finalizingDownload = true;
 
-      QTimer::singleShot(2500, [this]() {
+      QTimer::singleShot(2500, this, [this]() {
         colorDownloading = false;
         distanceIconDownloading = false;
         finalizingDownload = false;

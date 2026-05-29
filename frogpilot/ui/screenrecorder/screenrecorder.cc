@@ -1,24 +1,31 @@
-#include "libyuv.h"
-
-#include "selfdrive/ui/qt/util.h"
-
 #include "frogpilot/ui/screenrecorder/screenrecorder.h"
 
-constexpr int BITRATE = 8 * 1024 * 1024;
-constexpr int MAX_DURATION = 1000 * 60 * 5;
-constexpr int SCREEN_WIDTH = 2160;
-constexpr int SCREEN_HEIGHT = 1080;
+#include <cmath>
 
-const QDir RECORDINGS_FOLDER("/data/media/screen_recordings");
+#include "common/timing.h"
+#include "selfdrive/ui/qt/util.h"
+
+namespace {
+constexpr int RECORD_BITRATE = 10 * 1024 * 1024;
+constexpr int SCREEN_HEIGHT = 1080;
+constexpr int SCREEN_WIDTH = 2160;
+}
 
 ScreenRecorder::ScreenRecorder(QWidget *parent) : QPushButton(parent) {
   setFixedSize(btn_size, btn_size);
 
   rootWidget = topWidget(this);
+  engine = std::make_unique<RecorderEngine>(SCREEN_WIDTH, SCREEN_HEIGHT, UI_FREQ, RECORD_BITRATE);
 
   QObject::connect(this, &QPushButton::clicked, this, &ScreenRecorder::toggleRecording);
   QObject::connect(uiState(), &UIState::offroadTransition, this, &ScreenRecorder::stopRecording);
   QObject::connect(uiState(), &UIState::uiUpdate, this, &ScreenRecorder::updateState);
+}
+
+ScreenRecorder::~ScreenRecorder() {
+  if (engine) {
+    engine->stop();
+  }
 }
 
 void ScreenRecorder::updateState() {
@@ -26,21 +33,19 @@ void ScreenRecorder::updateState() {
     return;
   }
 
-  if (QDateTime::currentMSecsSinceEpoch() - startedTime > MAX_DURATION) {
-    stopRecording();
-    startRecording();
+  if (!engine->is_recording()) {
+    engine->stop();
+
+    recording = false;
+
+    update();
+
     return;
   }
 
-  if (captureBuffer.size() != QSize(SCREEN_WIDTH, SCREEN_HEIGHT)) {
-    captureBuffer = QImage(SCREEN_WIDTH, SCREEN_HEIGHT, QImage::Format_RGBA8888);
+  if (frameCount++ % 2 == 0) {
+    engine->submit_frame(rootWidget->grab().toImage(), nanos_since_boot());
   }
-
-  QPainter p(&captureBuffer);
-  rootWidget->render(&p);
-  p.end();
-
-  imageQueue.push(QImage(captureBuffer));
 }
 
 void ScreenRecorder::toggleRecording() {
@@ -48,27 +53,19 @@ void ScreenRecorder::toggleRecording() {
 }
 
 void ScreenRecorder::startRecording() {
-  encoder = std::make_unique<OmxEncoder>(
-    RECORDINGS_FOLDER.path().toStdString().c_str(),
-    SCREEN_WIDTH,
-    SCREEN_HEIGHT,
-    UI_FREQ,
-    BITRATE
-  );
-  encoder->encoder_open((QDateTime::currentDateTime().toString("yyyy-MM-dd_HH-mm-ss").toStdString() + ".mp4").c_str());
+  if (recording) {
+    return;
+  }
 
-  if (!encoder->is_open) {
-    encoder.reset();
+  if (!engine->start()) {
     return;
   }
 
   recording = true;
 
+  frameCount = 0;
+
   startedTime = QDateTime::currentMSecsSinceEpoch();
-
-  imageQueue.clear();
-
-  encodingThread = std::thread(&ScreenRecorder::encodeImage, this);
 
   update();
 }
@@ -80,34 +77,9 @@ void ScreenRecorder::stopRecording() {
 
   recording = false;
 
-  if (encodingThread.joinable()) {
-    encodingThread.join();
-  }
-
-  if (encoder) {
-    encoder->encoder_close();
-    encoder.reset();
-  }
+  engine->stop();
 
   update();
-}
-
-void ScreenRecorder::encodeImage() {
-  while (recording) {
-    QImage image;
-    if (imageQueue.pop_wait_for(image, std::chrono::milliseconds(1000))) {
-      uint64_t currentTimestamp = nanos_since_boot();
-
-      if (image.format() != QImage::Format_RGBA8888) {
-        image = image.convertToFormat(QImage::Format_RGBA8888);
-      }
-
-      const uint8_t *bits = image.constBits();
-      if (bits) {
-        encoder->encode_frame_rgba(bits, SCREEN_WIDTH, SCREEN_HEIGHT, currentTimestamp);
-      }
-    }
-  }
 }
 
 void ScreenRecorder::paintEvent(QPaintEvent *event) {

@@ -470,7 +470,7 @@ void FrogPilotModelPanel::updateState(const UIState &s, const FrogPilotUIState &
     if (progress == "All models downloaded!" || progress == "Downloaded!" && !allModelsDownloading || downloadFailed) {
       finalizingDownload = true;
 
-      QTimer::singleShot(2500, [progress, this]() {
+      QTimer::singleShot(2500, this, [progress, this]() {
         allModelsDownloading = false;
         cancellingDownload = false;
         finalizingDownload = false;
@@ -525,7 +525,7 @@ void FrogPilotModelPanel::updateState(const UIState &s, const FrogPilotUIState &
     if (progress == "Updated!" && updatingTinygrad || downloadFailed) {
       finalizingDownload = true;
 
-      QTimer::singleShot(2500, [progress, this]() {
+      QTimer::singleShot(2500, this, [progress, this]() {
         modelDownloading = !params_memory.get("ModelDownloadProgress").empty();
 
         if (modelDownloading) {

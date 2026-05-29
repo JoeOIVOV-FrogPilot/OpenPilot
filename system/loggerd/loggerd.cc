@@ -149,12 +149,15 @@ int handle_encoder_msg(LoggerdState *s, Message *msg, std::string &name, struct 
     if (re.audio_initialized || !encoder_info.include_audio) {
       // we are in this segment now, process any queued messages before this one
       if (!re.q.empty()) {
-        for (auto qmsg : re.q) {
+        // Swap the queue out before iterating — recursive write_encode_data can push_back
+        // into re.q, which would invalidate iterators if done during a range-for loop.
+        std::vector<Message *> pending;
+        std::swap(pending, re.q);
+        for (auto qmsg : pending) {
           capnp::FlatArrayMessageReader reader({(capnp::word *)qmsg->getData(), qmsg->getSize() / sizeof(capnp::word)});
           bytes_count += write_encode_data(s, reader.getRoot<cereal::Event>(), re, encoder_info);
           delete qmsg;
         }
-        re.q.clear();
       }
       bytes_count += write_encode_data(s, event, re, encoder_info);
       delete msg;

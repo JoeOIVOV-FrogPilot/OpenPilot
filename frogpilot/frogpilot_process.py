@@ -15,7 +15,6 @@ from openpilot.frogpilot.common.frogpilot_utilities import ThreadManager, flash_
 from openpilot.frogpilot.common.frogpilot_variables import ERROR_LOGS_PATH, FrogPilotVariables
 from openpilot.frogpilot.controls.frogpilot_planner import FrogPilotPlanner
 from openpilot.frogpilot.system.frogpilot_stats import send_stats
-from openpilot.frogpilot.system.frogpilot_telemetry import run_offroad_sweep
 from openpilot.frogpilot.system.frogpilot_tracking import FrogPilotTracking
 
 ASSET_CHECK_RATE = (1 / DT_MDL)
@@ -47,8 +46,7 @@ def transition_offroad(frogpilot_planner, theme_manager, thread_manager, time_va
     theme_manager.update_active_theme(time_validated, frogpilot_toggles, randomize_theme=True)
 
   if time_validated:
-    thread_manager.run_with_lock(run_offroad_sweep, (frogpilot_toggles,))
-    thread_manager.run_with_lock(send_stats, (params, frogpilot_toggles))
+    thread_manager.run_with_lock(send_stats, (frogpilot_planner.gps_position, params, frogpilot_toggles))
 
 def transition_onroad(error_log):
   if error_log.is_file():
@@ -117,7 +115,7 @@ def frogpilot_thread():
   while True:
     sm.update()
 
-    now = datetime.datetime.now(datetime.timezone.utc)
+    now = datetime.datetime.now(datetime.UTC)
 
     started = sm["deviceState"].started
 
@@ -168,7 +166,7 @@ def frogpilot_thread():
       theme_manager.update_active_theme(time_validated, frogpilot_toggles)
 
       thread_manager.run_with_lock(backup_toggles, (params, True))
-      thread_manager.run_with_lock(send_stats, (params, frogpilot_toggles))
+      thread_manager.run_with_lock(send_stats, (json.loads(params.get("LastGPSPosition") or "{}"), params, frogpilot_toggles))
       thread_manager.run_with_lock(update_checks, (now, theme_manager, thread_manager, params, params_memory, frogpilot_toggles, True))
 
     rate_keeper.keep_time()
