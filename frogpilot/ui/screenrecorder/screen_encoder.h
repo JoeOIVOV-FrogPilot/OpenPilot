@@ -3,6 +3,7 @@
 extern "C" {
 #include <libavformat/avformat.h>
 #include <libavcodec/avcodec.h>
+#include <libavutil/dict.h>
 }
 
 #include <atomic>
@@ -21,6 +22,8 @@ public:
 
   void close();
   void encode_frame(const uint8_t *rgb32, int stride, uint64_t ts_ns);
+
+  bool ok() const { return is_open.load() && !stream_error.load(); }
 
   std::atomic<bool> is_open{false};
 
@@ -44,6 +47,7 @@ private:
 
   bool base_set = false;
   bool header_written = false;
+  bool warned_no_header = false;
 
   int fd = -1;
   int in_buf_size = 0;
@@ -53,7 +57,11 @@ private:
 
   uint64_t base_ts_us = 0;
 
+  int64_t last_dts = -1;
+
   std::atomic<bool> stream_error{false};
+
+  std::atomic<uint64_t> drain_deadline_ns{0};
 
   std::thread dequeue_thread;
 

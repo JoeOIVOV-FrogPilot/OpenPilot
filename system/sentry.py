@@ -1,5 +1,4 @@
 """Install exception handler for process crash."""
-import os
 import sentry_sdk
 import traceback
 from datetime import datetime
@@ -17,9 +16,9 @@ from openpilot.frogpilot.common.frogpilot_variables import ERROR_LOGS_PATH
 
 class SentryProject(Enum):
   # python project
-  SELFDRIVE = os.environ.get("SENTRY_DSN", "")
+  SELFDRIVE = "https://7ba43fba4cfcf1a6c0eff83d40374e43@o4505034923769856.ingest.us.sentry.io/4505034930651136"
   # native project
-  SELFDRIVE_NATIVE = os.environ.get("SENTRY_DSN", "")
+  SELFDRIVE_NATIVE = "https://7ba43fba4cfcf1a6c0eff83d40374e43@o4505034923769856.ingest.us.sentry.io/4505034930651136"
 
 
 def report_tombstone(fn: str, message: str, contents: str) -> None:
@@ -30,6 +29,14 @@ def report_tombstone(fn: str, message: str, contents: str) -> None:
     scope.set_extra("tombstone", contents)
     sentry_sdk.capture_message(message=message)
     sentry_sdk.flush()
+
+
+def capture_message(message: str, *args, **kwargs) -> None:
+  try:
+    sentry_sdk.capture_message(message, *args, **kwargs)
+    sentry_sdk.flush()
+  except Exception:
+    cloudlog.exception("sentry exception")
 
 
 def capture_exception(*args, crash_log=True, **kwargs) -> None:
@@ -49,6 +56,45 @@ def capture_exception(*args, crash_log=True, **kwargs) -> None:
     sentry_sdk.flush()  # https://github.com/getsentry/sentry-python/issues/291
   except Exception:
     cloudlog.exception("sentry exception")
+
+
+def save_watchdog_timeout(name: str, dt: float, exitcode, pid, diagnostics: dict | None = None) -> None:
+  try:
+    ERROR_LOGS_PATH.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().astimezone().strftime("%Y-%m-%d--%H-%M-%S")
+    sections = [
+      f"Watchdog timeout: {name}",
+      f"time: {timestamp}",
+      f"dt: {round(dt, 3)}s",
+      f"exitcode: {exitcode}",
+      f"pid: {pid}",
+    ]
+    for filename, content in (diagnostics or {}).items():
+      if content:
+        sections.append(f"\n===== {filename} =====\n{content}")
+    (ERROR_LOGS_PATH / f"{timestamp}--watchdog-{name}.log").write_text("\n".join(sections))
+  except Exception:
+    cloudlog.exception("failed to save watchdog timeout log")
+
+
+def capture_watchdog_timeout(name: str, dt: float, exitcode, pid, diagnostics: dict | None = None) -> None:
+  save_watchdog_timeout(name, dt, exitcode, pid, diagnostics)
+  try:
+    with sentry_sdk.push_scope() as scope:
+      scope.set_tag("watchdog_process", name)
+      scope.set_extra("watchdog_dt", round(dt, 3))
+      scope.set_extra("exitcode", exitcode)
+      scope.set_extra("pid", pid)
+      for filename, content in (diagnostics or {}).items():
+        if content:
+          try:
+            scope.add_attachment(bytes=content.encode(), filename=filename)
+          except Exception:
+            scope.set_extra(filename, content[:8000])
+      sentry_sdk.capture_message(f"Watchdog timeout: {name}", level="error")
+      sentry_sdk.flush(timeout=2.0)
+  except Exception:
+    cloudlog.exception("failed to capture watchdog timeout")
 
 
 def set_tag(key: str, value: str) -> None:
@@ -73,20 +119,20 @@ def init(project: SentryProject) -> bool:
   build_metadata = get_build_metadata()
   # forks like to mess with this, so double check
   FrogPilot = "frogai" in build_metadata.openpilot.git_origin.lower()
-  if not FrogPilot or PC:
+  if not FrogPilot or build_metadata.openpilot.is_dirty or PC:
     return False
 
   short_branch = build_metadata.channel
 
   if short_branch in ["COMMA", "HEAD"]:
-    return
+    return False
   elif short_branch == "FrogPilot-Development":
     env = "Development"
   elif build_metadata.release_channel:
     env = "Release"
   elif short_branch == "FrogPilot-Testing":
     env = "Testing"
-  elif build_metadata.tested_channel:
+  elif short_branch == "FrogPilot-Staging":
     env = "Staging"
   else:
     env = short_branch
@@ -110,5 +156,6 @@ def init(project: SentryProject) -> bool:
   sentry_sdk.set_tag("branch", short_branch)
   sentry_sdk.set_tag("commit", build_metadata.openpilot.git_commit)
   sentry_sdk.set_tag("updated", params.get("Updated"))
+  sentry_sdk.set_tag("installed", params.get("InstallDate"))
 
   return True

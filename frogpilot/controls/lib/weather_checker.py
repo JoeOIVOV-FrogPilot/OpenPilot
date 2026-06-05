@@ -63,7 +63,7 @@ class WeatherChecker:
     else:
       self.check_interval = 15 * 60
 
-    self.api_token, self.build_metadata, self.device_type, self.dongle_id = get_frogpilot_api_info()
+    self.api_token, self.build_metadata, self.device_type, self.dongle_id, *_ = get_frogpilot_api_info()
 
     self.session = requests.Session()
     self.session.headers.update({"Accept-Language": "en", "User-Agent": "frogpilot-api/1.0"})

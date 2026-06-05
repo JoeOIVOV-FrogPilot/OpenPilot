@@ -19,7 +19,7 @@ from openpilot.frogpilot.system.frogpilot_tracking import FrogPilotTracking
 
 ASSET_CHECK_RATE = (1 / DT_MDL)
 
-def check_assets(theme_manager, thread_manager, params_memory, frogpilot_toggles):
+def check_assets(now, theme_manager, thread_manager, params, params_memory, frogpilot_toggles):
   for asset_type, asset_param in THEME_COMPONENT_PARAMS.items():
     asset_to_download = params_memory.get(asset_param)
     if asset_to_download:
@@ -30,8 +30,11 @@ def check_assets(theme_manager, thread_manager, params_memory, frogpilot_toggles
 
   report_data = params_memory.get("IssueReported")
   if report_data:
-    capture_report(report_data["DiscordUser"], report_data["Issue"], vars(frogpilot_toggles))
+    capture_report(report_data["DiscordUser"], report_data["Issue"], params, vars(frogpilot_toggles))
     params_memory.remove("IssueReported")
+
+  if params_memory.get_bool("DownloadMaps"):
+    thread_manager.run_with_lock(update_maps, (now, params, params_memory, True))
 
 def transition_offroad(frogpilot_planner, theme_manager, thread_manager, time_validated, sm, params, frogpilot_toggles):
   params.put("LastGPSPosition", json.dumps(frogpilot_planner.gps_position))
@@ -43,7 +46,7 @@ def transition_offroad(frogpilot_planner, theme_manager, thread_manager, time_va
     theme_manager.update_active_theme(time_validated, frogpilot_toggles, randomize_theme=True)
 
   if time_validated:
-    thread_manager.run_with_lock(send_stats, (params, frogpilot_toggles))
+    thread_manager.run_with_lock(send_stats, (frogpilot_planner.gps_position, params, frogpilot_toggles))
 
 def transition_onroad(error_log):
   if error_log.is_file():
@@ -53,9 +56,9 @@ def update_checks(now, theme_manager, thread_manager, params, params_memory, fro
   while not (is_url_pingable("https://github.com") or is_url_pingable("https://gitlab.com")):
     time.sleep(60)
 
-  thread_manager.run_with_lock(update_maps, (now, params, params_memory))
-
   theme_manager.update_themes(frogpilot_toggles, boot_run)
+
+  thread_manager.run_with_lock(update_maps, (now, params, params_memory))
 
   if frogpilot_toggles.automatic_updates:
     thread_manager.run_with_lock(update_openpilot, (thread_manager, params))
@@ -89,7 +92,7 @@ def frogpilot_thread():
   sm = messaging.SubMaster(["carControl", "carState", "controlsState", "deviceState", "driverMonitoringState",
                             "gpsLocation", "gpsLocationExternal", "liveParameters", "managerState", "modelV2",
                             "onroadEvents", "pandaStates", "radarState", "selfdriveState", "frogpilotCarState",
-                            "frogpilotSelfdriveState", "frogpilotModelV2", "frogpilotOnroadEvents"],
+                            "frogpilotSelfdriveState", "frogpilotModelV2", "frogpilotOnroadEvents", "mapdOut"],
                             poll="modelV2")
 
   params = Params(return_defaults=True)
@@ -112,7 +115,7 @@ def frogpilot_thread():
   while True:
     sm.update()
 
-    now = datetime.datetime.now(datetime.timezone.utc)
+    now = datetime.datetime.now(datetime.UTC)
 
     started = sm["deviceState"].started
 
@@ -141,7 +144,7 @@ def frogpilot_thread():
     started_previously = started
 
     if rate_keeper.frame % ASSET_CHECK_RATE == 0:
-      check_assets(theme_manager, thread_manager, params_memory, frogpilot_toggles)
+      check_assets(now, theme_manager, thread_manager, params, params_memory, frogpilot_toggles)
 
     if params_memory.get_bool("FrogPilotTogglesUpdated") or theme_manager.theme_updated:
       frogpilot_toggles = update_toggles(frogpilot_variables, started, theme_manager, thread_manager, time_validated, params, frogpilot_toggles)
@@ -163,7 +166,7 @@ def frogpilot_thread():
       theme_manager.update_active_theme(time_validated, frogpilot_toggles)
 
       thread_manager.run_with_lock(backup_toggles, (params, True))
-      thread_manager.run_with_lock(send_stats, (params, frogpilot_toggles))
+      thread_manager.run_with_lock(send_stats, (json.loads(params.get("LastGPSPosition") or "{}"), params, frogpilot_toggles))
       thread_manager.run_with_lock(update_checks, (now, theme_manager, thread_manager, params, params_memory, frogpilot_toggles, True))
 
     rate_keeper.keep_time()

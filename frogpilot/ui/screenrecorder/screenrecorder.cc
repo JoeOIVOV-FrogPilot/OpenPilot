@@ -9,7 +9,7 @@ namespace {
 constexpr int RECORD_BITRATE = 10 * 1024 * 1024;
 constexpr int SCREEN_HEIGHT = 1080;
 constexpr int SCREEN_WIDTH = 2160;
-}  // namespace
+}
 
 ScreenRecorder::ScreenRecorder(QWidget *parent) : QPushButton(parent) {
   setFixedSize(btn_size, btn_size);
@@ -34,6 +34,8 @@ void ScreenRecorder::updateState() {
   }
 
   if (!engine->is_recording()) {
+    engine->stop();
+
     recording = false;
 
     update();

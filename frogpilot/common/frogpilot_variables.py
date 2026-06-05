@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 import json
 import math
-import os
 import random
 import tomllib
 
@@ -38,16 +37,17 @@ MAX_ACCELERATION = 4.0                    # ISO 15622:2018
 MAX_T_FOLLOW = 3.0                        # Maximum allowed following duration. Larger values risk losing track of the lead but may be increased as models improve
 MINIMUM_LATERAL_ACCELERATION = 1.3        # m/s^2, typical minimum lateral acceleration when taking curves
 PLANNER_TIME = ModelConstants.T_IDXS[-1]  # Length of time the model projects out for
+SLOWDOWN_PERCENTAGE = 0.50                # Treat an end-of-horizon speed drop below 50% of the current speed as a stop hint
 THRESHOLD = 1 - 1 / math.e                # Requires the condition to be true for ~1 second
 
 NON_DRIVING_GEARS = [GearShifter.neutral, GearShifter.park, GearShifter.reverse, GearShifter.unknown]
 
-DISCORD_WEBHOOK_URL_REPORT = os.getenv("DISCORD_WEBHOOK_URL_REPORT")
-DISCORD_WEBHOOK_URL_THEME = os.getenv("DISCORD_WEBHOOK_URL_THEME")
+FROGPILOT_API = "https://frogpilot.com/api"
 
 RESOURCES_REPO = "FrogAi/FrogPilot-Resources"
 
 ACTIVE_THEME_PATH = Path(BASEDIR) / "frogpilot/assets/active_theme"
+CITY_LOOKUP_PATH = Path(BASEDIR) / "frogpilot/assets/city_lookup.sqlite"
 METADATAS_PATH = Path(BASEDIR) / "frogpilot/assets/model_metadata"
 MODELS_PATH = Path("/data/models")
 RANDOM_EVENTS_PATH = Path(BASEDIR) / "frogpilot/assets/random_events"
@@ -71,7 +71,6 @@ HD_PATH = Path("/cache/use_HD")
 KONIK_LOGS_PATH = Path("/data/media/0/realdata_konik")
 KONIK_PATH = Path("/cache/use_konik")
 
-MAPD_PATH = Path("/data/media/0/osm/mapd")
 MAPS_PATH = Path("/data/media/0/osm/offline")
 
 NNFF_MODELS_PATH = Path(BASEDIR) / "frogpilot/assets/nnff_models"
@@ -157,7 +156,6 @@ EXCLUDED_KEYS = {
   "MapBoxRequests",
   "ModelDrivesAndScores",
   "openpilotMinutes",
-  "OverpassRequests",
   "PandaSignatures",
   "SpeedLimits",
   "SpeedLimitsFiltered",
@@ -239,7 +237,7 @@ class FrogPilotVariables:
     self.frogs_go_moo = FROGS_GO_MOO_PATH.is_file()
     toggle.block_user = (self.development_branch or branch == "MAKE-PRS-HERE" or self.vetting_branch) and not self.frogs_go_moo
 
-    self.tuning_level = self.params.get("TuningLevel") if self.params.get_bool("TuningLevelConfirmed") else TUNING_LEVELS["ADVANCED"]
+    toggle.tuning_level = self.params.get("TuningLevel") if self.params.get_bool("TuningLevelConfirmed") else TUNING_LEVELS["ADVANCED"]
 
     device_management = self.get_value("DeviceManagement")
 
@@ -277,11 +275,11 @@ class FrogPilotVariables:
     for source in (theme_colors, self.stock_colors):
       color = source.get(key)
       if isinstance(color, dict):
-        return f"#{color.get("alpha", 255):02X}{color.get("red", 255):02X}{color.get("green", 255):02X}{color.get("blue", 255):02X}"
+        return f"#{color.get('alpha', 255):02X}{color.get('red', 255):02X}{color.get('green', 255):02X}{color.get('blue', 255):02X}"
     return "#FFFFFFFF"
 
   def get_value(self, key, cast=bool, condition=True, conversion=None, default=None, min=None, max=None):
-    if not condition or (self.tuning_level < self.tuning_levels.get(key, 0)):
+    if not condition or (self.frogpilot_toggles.tuning_level < self.tuning_levels.get(key, 0)):
       if default is not None:
         return default
       return False if cast is bool else self.default_values.get(key)
@@ -312,7 +310,7 @@ class FrogPilotVariables:
 
   def update(self, holiday_theme="stock", started=False):
     toggle = self.frogpilot_toggles
-    self.tuning_level = self.params.get("TuningLevel") if self.params.get_bool("TuningLevelConfirmed") else TUNING_LEVELS["ADVANCED"]
+    toggle.tuning_level = self.params.get("TuningLevel") if self.params.get_bool("TuningLevelConfirmed") else TUNING_LEVELS["ADVANCED"]
 
     msg_bytes = self.params.get("CarParams" if started else "CarParamsPersistent", block=started)
     if msg_bytes:
@@ -474,12 +472,6 @@ class FrogPilotVariables:
     toggle.relaxed_jerk_speed = self.get_value("RelaxedJerkSpeed", cast=float, condition=toggle.custom_personalities, conversion=0.01, min=0.25, max=2.0)
     toggle.relaxed_jerk_speed_decrease = self.get_value("RelaxedJerkSpeedDecrease", cast=float, condition=toggle.custom_personalities, conversion=0.01, min=0.25, max=2.0)
     toggle.relaxed_follow = self.get_value("RelaxedFollow", cast=float, condition=toggle.custom_personalities, min=1, max=MAX_T_FOLLOW)
-    toggle.traffic_mode_jerk_acceleration = [self.get_value("TrafficJerkAcceleration", cast=float, condition=toggle.custom_personalities, conversion=0.01, min=0.25, max=2.0), toggle.aggressive_jerk_acceleration]
-    toggle.traffic_mode_jerk_deceleration = [self.get_value("TrafficJerkDeceleration", cast=float, condition=toggle.custom_personalities, conversion=0.01, min=0.25, max=2.0), toggle.aggressive_jerk_deceleration]
-    toggle.traffic_mode_jerk_danger = [self.get_value("TrafficJerkDanger", cast=float, condition=toggle.custom_personalities, conversion=0.01, min=0.25, max=2.0), toggle.aggressive_jerk_danger]
-    toggle.traffic_mode_jerk_speed = [self.get_value("TrafficJerkSpeed", cast=float, condition=toggle.custom_personalities, conversion=0.01, min=0.25, max=2.0), toggle.aggressive_jerk_speed]
-    toggle.traffic_mode_jerk_speed_decrease = [self.get_value("TrafficJerkSpeedDecrease", cast=float, condition=toggle.custom_personalities, conversion=0.01, min=0.25, max=2.0), toggle.aggressive_jerk_speed_decrease]
-    toggle.traffic_mode_follow = [self.get_value("TrafficFollow", cast=float, condition=toggle.custom_personalities, min=0.5, max=MAX_T_FOLLOW), toggle.aggressive_follow]
 
     custom_themes = self.get_value("CustomThemes")
     toggle.color_scheme = self.get_value("ColorScheme", cast=None, condition=custom_themes, default="stock")
@@ -547,6 +539,7 @@ class FrogPilotVariables:
     device_management = self.get_value("DeviceManagement")
     toggle.device_shutdown_time = DEVICE_SHUTDOWN_TIMES.get(self.get_value("DeviceShutdown", cast=int, condition=device_management))
     toggle.increase_thermal_limits = self.get_value("IncreaseThermalLimits", condition=device_management)
+    toggle.frogpilot_telemetry = self.get_value("FrogPilotTelemetry", condition=device_management)
     toggle.low_voltage_shutdown = self.get_value("LowVoltageShutdown", cast=float, condition=device_management, min=VBATT_PAUSE_CHARGING, max=12.5)
     toggle.no_logging = self.get_value("NoLogging", condition=device_management and not self.vetting_branch) or toggle.force_onroad
     toggle.no_uploads = self.get_value("NoUploads", condition=device_management and not self.vetting_branch)
@@ -733,10 +726,13 @@ class FrogPilotVariables:
 
     toggle.tethering_config = self.get_value("TetheringEnabled", cast=float)
 
+    toggle.toyota_dsu_bypass = self.get_value("ToyotaDSUBypass", condition=toggle.car_make == "toyota" and not toggle.has_sdsu)
+
     toyota_doors = self.get_value("ToyotaDoors", condition=toggle.car_make == "toyota")
     toggle.lock_doors = self.get_value("LockDoors", condition=toyota_doors)
     toggle.unlock_doors = self.get_value("UnlockDoors", condition=toyota_doors)
 
     toggle.volt_sng = self.get_value("VoltSNG", condition=toggle.car_model == "CHEVROLET_VOLT")
 
+    process_frogpilot_toggles.cache_clear()
     self.params_memory.remove("FrogPilotTogglesUpdated")

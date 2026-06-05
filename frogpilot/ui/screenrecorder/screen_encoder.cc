@@ -8,6 +8,7 @@
 #include <unistd.h>
 
 #include "common/swaglog.h"
+#include "common/timing.h"
 #include "common/util.h"
 
 #include "third_party/libyuv/include/libyuv.h"
@@ -24,13 +25,24 @@ namespace {
 
 const char *ENCODER_DEV = "/dev/v4l/by-path/platform-aa00000.qcom_vidc-video-index1";
 
-void request_buffers(int fd, v4l2_buf_type buf_type, unsigned int count) {
+constexpr int MUX_TIMEBASE = 90000;
+
+constexpr uint64_t DRAIN_TIMEOUT_NS = 3ULL * 1000000000ULL;
+
+constexpr uint64_t DRAIN_INPUT_TIMEOUT_NS = 1ULL * 1000000000ULL;
+
+constexpr int ENQUEUE_TIMEOUT_MS = 250;
+
+unsigned int request_buffers(int fd, v4l2_buf_type buf_type, unsigned int count) {
   v4l2_requestbuffers reqbuf = {
     .count = count,
     .type = buf_type,
     .memory = V4L2_MEMORY_USERPTR,
   };
-  util::safe_ioctl(fd, VIDIOC_REQBUFS, &reqbuf);
+  if (util::safe_ioctl(fd, VIDIOC_REQBUFS, &reqbuf) != 0) {
+    return 0;
+  }
+  return reqbuf.count;
 }
 
 bool queue_buffer(int fd, v4l2_buf_type buf_type, unsigned int index, VisionBuf *buf, struct timeval timestamp = {}) {
@@ -54,7 +66,7 @@ bool queue_buffer(int fd, v4l2_buf_type buf_type, unsigned int index, VisionBuf 
 
 bool dequeue_buffer(int fd, v4l2_buf_type buf_type, unsigned int *index = nullptr,
                     unsigned int *bytesused = nullptr, unsigned int *flags = nullptr,
-                    struct timeval *timestamp = nullptr) {
+                    struct timeval *timestamp = nullptr, unsigned int *data_offset = nullptr) {
   v4l2_plane plane = {0};
   v4l2_buffer v4l_buf = {
     .type = buf_type,
@@ -82,10 +94,14 @@ bool dequeue_buffer(int fd, v4l2_buf_type buf_type, unsigned int *index = nullpt
     *timestamp = v4l_buf.timestamp;
   }
 
+  if (data_offset) {
+    *data_offset = plane.data_offset;
+  }
+
   return true;
 }
 
-}  // namespace
+}
 
 ScreenEncoder::ScreenEncoder(int width, int height, int fps, int bitrate) : bitrate(bitrate), fps(fps), height(height), width(width) {}
 
@@ -100,9 +116,12 @@ bool ScreenEncoder::open(const std::string &path) {
 
   base_set = false;
   header_written = false;
+  warned_no_header = false;
   stream_error = false;
 
   base_ts_us = 0;
+  last_dts = -1;
+  drain_deadline_ns = 0;
 
   if (!setup_muxer(path)) {
     teardown_muxer();
@@ -129,26 +148,22 @@ void ScreenEncoder::close() {
 
   is_open = false;
 
-  if (!stream_error && fd >= 0) {
-    bool drained = true;
-
+  if (fd >= 0 && !stream_error) {
+    uint64_t drain_budget_end = nanos_since_boot() + DRAIN_INPUT_TIMEOUT_NS;
     for (int i = 0; i < BUF_IN_COUNT; i++) {
+      int remaining_ms = (int)(((int64_t)drain_budget_end - (int64_t)nanos_since_boot()) / 1000000);
       unsigned int idx;
-
-      if (stream_error || !free_buf_in.try_pop(idx, 2000)) {
-        drained = false;
+      if (remaining_ms <= 0 || !free_buf_in.try_pop(idx, remaining_ms)) {
+        LOGW("screenrecorder: encoder did not fully drain before stop");
         break;
       }
     }
 
-    if (drained) {
-      v4l2_encoder_cmd cmd = { .cmd = V4L2_ENC_CMD_STOP };
-      util::safe_ioctl(fd, VIDIOC_ENCODER_CMD, &cmd);
-    } else {
-      LOGE("screenrecorder: encoder did not drain, forcing stop");
-      stream_error = true;
-    }
+    v4l2_encoder_cmd cmd = { .cmd = V4L2_ENC_CMD_STOP };
+    util::safe_ioctl(fd, VIDIOC_ENCODER_CMD, &cmd);
   }
+
+  drain_deadline_ns = nanos_since_boot() + DRAIN_TIMEOUT_NS;
 
   if (dequeue_thread.joinable()) {
     dequeue_thread.join();
@@ -244,8 +259,13 @@ bool ScreenEncoder::setup_device() {
     util::safe_ioctl(fd, VIDIOC_S_CTRL, &c);
   }
 
-  request_buffers(fd, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, BUF_OUT_COUNT);
-  request_buffers(fd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE, BUF_IN_COUNT);
+  unsigned int n_capture = request_buffers(fd, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, BUF_OUT_COUNT);
+  unsigned int n_output = request_buffers(fd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE, BUF_IN_COUNT);
+  if (n_capture < BUF_OUT_COUNT || n_output < BUF_IN_COUNT) {
+    LOGE("screenrecorder: REQBUFS granted too few buffers (capture %u/%d, output %u/%d)",
+         n_capture, BUF_OUT_COUNT, n_output, BUF_IN_COUNT);
+    return false;
+  }
 
   v4l2_buf_type bt = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
   if (util::safe_ioctl(fd, VIDIOC_STREAMON, &bt) != 0) {
@@ -261,7 +281,10 @@ bool ScreenEncoder::setup_device() {
 
   for (int i = 0; i < BUF_OUT_COUNT; i++) {
     buf_out[i].allocate(out_buf_size);
-    queue_buffer(fd, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, i, &buf_out[i]);
+    if (!queue_buffer(fd, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, i, &buf_out[i])) {
+      LOGE("screenrecorder: failed to queue initial capture buffer %d", i);
+      return false;
+    }
   }
 
   for (int i = 0; i < BUF_IN_COUNT; i++) {
@@ -310,7 +333,13 @@ void ScreenEncoder::encode_frame(const uint8_t *rgb32, int stride, uint64_t ts_n
   }
 
   unsigned int idx;
-  if (!free_buf_in.try_pop(idx, 1000)) {
+  if (!free_buf_in.try_pop(idx, ENQUEUE_TIMEOUT_MS)) {
+    static uint64_t last_drop_warn_ns = 0;
+    uint64_t now = nanos_since_boot();
+    if (now - last_drop_warn_ns > 1000000000ULL) {
+      LOGW("screenrecorder: encoder backpressure, dropping frame");
+      last_drop_warn_ns = now;
+    }
     return;
   }
 
@@ -342,6 +371,13 @@ void ScreenEncoder::dequeue_loop() {
       break;
     }
 
+    uint64_t deadline = drain_deadline_ns.load();
+    if (deadline != 0 && nanos_since_boot() > deadline) {
+      LOGE("screenrecorder: timed out waiting for encoder EOS, forcing teardown");
+      stream_error = true;
+      break;
+    }
+
     int rc = poll(&pfd, 1, 1000);
     if (rc < 0) {
       if (errno == EINTR) {
@@ -356,16 +392,22 @@ void ScreenEncoder::dequeue_loop() {
     }
 
     if (pfd.revents & POLLIN) {
-      unsigned int index = 0, bytesused = 0, flags = 0;
+      unsigned int index = 0, bytesused = 0, flags = 0, data_offset = 0;
       struct timeval ts = {};
-      if (!dequeue_buffer(fd, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, &index, &bytesused, &flags, &ts)) {
+      if (!dequeue_buffer(fd, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, &index, &bytesused, &flags, &ts, &data_offset)) {
         LOGE("screenrecorder: capture DQBUF failed");
         stream_error = true;
         break;
       }
 
+      if (index >= BUF_OUT_COUNT) {
+        LOGE("screenrecorder: capture DQBUF returned out-of-range index %u", index);
+        stream_error = true;
+        break;
+      }
+
       buf_out[index].sync(VISIONBUF_SYNC_FROM_DEVICE);
-      uint8_t *data = (uint8_t *)buf_out[index].addr;
+      uint8_t *data = (uint8_t *)buf_out[index].addr + data_offset;
 
       if (flags & V4L2_QCOM_BUF_FLAG_EOS) {
         exit = true;
@@ -376,12 +418,16 @@ void ScreenEncoder::dequeue_loop() {
         mux_write_packet(data, bytesused, ts_us, flags & V4L2_BUF_FLAG_KEYFRAME);
       }
 
-      queue_buffer(fd, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, index, &buf_out[index]);
+      if (!exit && !queue_buffer(fd, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, index, &buf_out[index])) {
+        LOGE("screenrecorder: failed to requeue capture buffer %u", index);
+        stream_error = true;
+        break;
+      }
     }
 
     if (pfd.revents & POLLOUT) {
       unsigned int index = 0;
-      if (dequeue_buffer(fd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE, &index)) {
+      if (dequeue_buffer(fd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE, &index) && index < BUF_IN_COUNT) {
         free_buf_in.push(index);
       }
     }
@@ -417,7 +463,7 @@ bool ScreenEncoder::setup_muxer(const std::string &path) {
   codec_ctx->width = width;
   codec_ctx->height = height;
   codec_ctx->pix_fmt = AV_PIX_FMT_YUV420P;
-  codec_ctx->time_base = (AVRational){ 1, fps };
+  codec_ctx->time_base = (AVRational){ 1, MUX_TIMEBASE };
 
   out_stream = avformat_new_stream(ofmt_ctx, NULL);
   if (!out_stream) {
@@ -486,7 +532,11 @@ void ScreenEncoder::mux_write_header(const uint8_t *data, int len) {
     return;
   }
 
-  if (avformat_write_header(ofmt_ctx, NULL) < 0) {
+  AVDictionary *opts = nullptr;
+  av_dict_set(&opts, "movflags", "frag_keyframe+empty_moov+default_base_moof", 0);
+  int rc = avformat_write_header(ofmt_ctx, &opts);
+  av_dict_free(&opts);
+  if (rc < 0) {
     LOGE("screenrecorder: avformat_write_header failed");
     stream_error = true;
     return;
@@ -497,6 +547,10 @@ void ScreenEncoder::mux_write_header(const uint8_t *data, int len) {
 
 void ScreenEncoder::mux_write_packet(const uint8_t *data, int len, uint64_t ts_us, bool keyframe) {
   if (!header_written) {
+    if (!warned_no_header) {
+      LOGE("screenrecorder: dropping encoded frame, no codec header written yet");
+      warned_no_header = true;
+    }
     return;
   }
 
@@ -511,21 +565,31 @@ void ScreenEncoder::mux_write_packet(const uint8_t *data, int len, uint64_t ts_u
   }
 
   AVRational in_tb = { 1, 1000000 };
-  AVPacket pkt;
-  av_init_packet(&pkt);
-  pkt.data = (uint8_t *)data;
-  pkt.size = len;
+  AVPacket *pkt = av_packet_alloc();
+  if (!pkt) {
+    LOGE("screenrecorder: av_packet_alloc failed");
+    return;
+  }
+  pkt->data = (uint8_t *)data;
+  pkt->size = len;
+  pkt->stream_index = out_stream->index;
 
   enum AVRounding rnd = (enum AVRounding)(AV_ROUND_NEAR_INF | AV_ROUND_PASS_MINMAX);
-  pkt.pts = pkt.dts = av_rescale_q_rnd(rel, in_tb, out_stream->time_base, rnd);
-  pkt.duration = av_rescale_q(1000000 / fps, in_tb, out_stream->time_base);
+  int64_t dts = av_rescale_q_rnd(rel, in_tb, out_stream->time_base, rnd);
+  if (dts <= last_dts) {
+    dts = last_dts + 1;
+  }
+  last_dts = dts;
+  pkt->pts = pkt->dts = dts;
+  pkt->duration = av_rescale_q(1000000 / fps, in_tb, out_stream->time_base);
   if (keyframe) {
-    pkt.flags |= AV_PKT_FLAG_KEY;
+    pkt->flags |= AV_PKT_FLAG_KEY;
   }
 
-  if (av_interleaved_write_frame(ofmt_ctx, &pkt) < 0) {
-    LOGW("screenrecorder: av_interleaved_write_frame failed (len %d)", len);
+  if (av_interleaved_write_frame(ofmt_ctx, pkt) < 0) {
+    LOGE("screenrecorder: av_interleaved_write_frame failed (len %d), stopping", len);
+    stream_error = true;
   }
 
-  av_packet_unref(&pkt);
+  av_packet_free(&pkt);
 }

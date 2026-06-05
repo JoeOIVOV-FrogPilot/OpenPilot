@@ -2,6 +2,8 @@
 
 #include <chrono>
 
+#include <sys/statvfs.h>
+
 #include <QDateTime>
 #include <QDir>
 
@@ -9,9 +11,12 @@
 #include "common/timing.h"
 #include "common/util.h"
 
+#include "third_party/libyuv/include/libyuv.h"
+
 namespace {
 const QString RECORDINGS_DIR = "/data/media/screen_recordings";
 constexpr uint64_t MAX_SEGMENT_NS = 5ULL * 60 * 1000000000ULL;
+constexpr uint64_t MIN_FREE_SPACE_BYTES = 1ULL << 30;
 }
 
 RecorderEngine::RecorderEngine(int width, int height, int fps, int bitrate) : bitrate(bitrate), fps(fps), height(height), width(width) {}
@@ -20,24 +25,30 @@ RecorderEngine::~RecorderEngine() {
   stop();
 }
 
-QImage RecorderEngine::blend_frames(const QImage &a, const QImage &b) {
-  QImage out(a.size(), a.format());
-
-  const uint8_t *pa = a.constBits();
-  const uint8_t *pb = b.constBits();
-
-  uint8_t *po = out.bits();
-
-  const int n = a.bytesPerLine() * a.height();
-
-  for (int i = 0; i < n; i++) {
-    po[i] = (uint8_t)((pa[i] + pb[i]) >> 1);
+const QImage &RecorderEngine::blend_frames(const QImage &a, const QImage &b) {
+  if (blend_buf.size() != a.size() || blend_buf.format() != a.format()) {
+    blend_buf = QImage(a.size(), a.format());
   }
 
-  return out;
+  libyuv::ARGBInterpolate(a.constBits(), a.bytesPerLine(),
+                          b.constBits(), b.bytesPerLine(),
+                          blend_buf.bits(), blend_buf.bytesPerLine(),
+                          a.width(), a.height(), 128);
+
+  return blend_buf;
 }
 
 bool RecorderEngine::open_segment() {
+  struct statvfs vfs;
+  if (statvfs(RECORDINGS_DIR.toStdString().c_str(), &vfs) == 0) {
+    uint64_t free_bytes = (uint64_t)vfs.f_bavail * vfs.f_frsize;
+    if (free_bytes < MIN_FREE_SPACE_BYTES) {
+      LOGE("screenrecorder: not enough free space to record (%llu MB free)",
+           (unsigned long long)(free_bytes >> 20));
+      return false;
+    }
+  }
+
   encoder = std::make_unique<ScreenEncoder>(width, height, fps, bitrate);
 
   if (!encoder->open(segment_path())) {
@@ -51,13 +62,17 @@ bool RecorderEngine::open_segment() {
 }
 
 std::string RecorderEngine::segment_path() const {
-  QString name = QDateTime::currentDateTime().toString("MMMM_dd_yyyy-hh-mmAP") + ".mp4";
+  QString name = QDateTime::currentDateTime().toString("MMMM_dd_yyyy-hh-mm-ssAP") + ".mp4";
   return (RECORDINGS_DIR + "/" + name).toStdString();
 }
 
 bool RecorderEngine::start() {
   if (recording) {
     return true;
+  }
+
+  if (worker.joinable()) {
+    worker.join();
   }
 
   QDir().mkpath(RECORDINGS_DIR);
@@ -144,7 +159,7 @@ void RecorderEngine::worker_loop() {
       prev_ts = 0;
     }
 
-    if (!encoder || !encoder->is_open) {
+    if (!encoder || !encoder->ok()) {
       recording = false;
       break;
     }
@@ -153,9 +168,18 @@ void RecorderEngine::worker_loop() {
       cf.image = cf.image.convertToFormat(QImage::Format_RGB32);
     }
 
+    if (cf.image.width() != width || cf.image.height() != height) {
+      if (!size_warned) {
+        LOGW("screenrecorder: grabbed frame %dx%d != configured %dx%d, rescaling",
+             cf.image.width(), cf.image.height(), width, height);
+        size_warned = true;
+      }
+      cf.image = cf.image.scaled(width, height, Qt::IgnoreAspectRatio, Qt::FastTransformation);
+    }
+
     if (!prev_image.isNull() && prev_image.size() == cf.image.size()) {
       uint64_t mid_ts = prev_ts + (cf.ts_ns - prev_ts) / 2;
-      QImage mid = blend_frames(prev_image, cf.image);
+      const QImage &mid = blend_frames(prev_image, cf.image);
       encoder->encode_frame(mid.constBits(), mid.bytesPerLine(), mid_ts);
     }
     encoder->encode_frame(cf.image.constBits(), cf.image.bytesPerLine(), cf.ts_ns);

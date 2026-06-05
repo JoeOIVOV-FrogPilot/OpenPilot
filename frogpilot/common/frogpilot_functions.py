@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-import io
+import dataclasses
 import json
-import random
 import requests
-import string
 import threading
 import time
 
 from pathlib import Path
 
+from cereal import messaging
+from openpilot.common.api import get_key_pair
 from openpilot.common.basedir import BASEDIR
 from openpilot.common.params import Params
 from openpilot.common.time_helpers import system_time_valid
@@ -17,54 +17,60 @@ from openpilot.system.hardware import HARDWARE
 
 from openpilot.frogpilot.assets.theme_manager import ThemeManager
 from openpilot.frogpilot.common.frogpilot_backups import backup_frogpilot
-from openpilot.frogpilot.common.frogpilot_utilities import is_FrogsGoMoo, run_cmd, use_konik_server
+from openpilot.frogpilot.common.frogpilot_utilities import get_frogpilot_api_info, is_FrogsGoMoo, is_url_pingable, run_cmd, use_konik_server
 from openpilot.frogpilot.common.frogpilot_variables import (
-  DISCORD_WEBHOOK_URL_REPORT, ERROR_LOGS_PATH, FROGS_GO_MOO_PATH, HD_LOGS_PATH, KONIK_LOGS_PATH, MAPD_PATH, MAPS_PATH, THEME_SAVE_PATH,
+  ERROR_LOGS_PATH, FROGPILOT_API, FROGS_GO_MOO_PATH, HD_LOGS_PATH, KONIK_LOGS_PATH, MAPS_PATH, THEME_SAVE_PATH,
   FrogPilotVariables, get_frogpilot_toggles
 )
 
 
-def capture_report(discord_user, report, frogpilot_toggles):
-  if not DISCORD_WEBHOOK_URL_REPORT:
+def capture_report(discord_user, report, params, frogpilot_toggles):
+  if not is_url_pingable(FROGPILOT_API):
     return
+
+  api_token, build_metadata, device_type, dongle_id, *_ = get_frogpilot_api_info()
 
   error_file_path = ERROR_LOGS_PATH / "error.txt"
   error_content = "No error log found."
   if error_file_path.exists():
     error_content = error_file_path.read_text()[:1000]
 
-  message = (
-    f"**🚨 New Error Report**\n\n"
-    f"**User:** `{discord_user}`\n\n"
-    f"**Report:**\n```{report}```\n\n"
-    f"**Error Log:**\n```{error_content}```\n\n"
-    f"**Toggle Settings:**"
-  )
+  payload = {
+    "api_token": api_token,
+    "build_metadata": build_metadata,
+    "device": device_type,
+    "discord_user": discord_user,
+    "error_content": error_content,
+    "frogpilot_dongle_id": dongle_id,
+    "frogpilot_toggles": frogpilot_toggles,
+    "report": report,
+  }
 
   try:
-    main_response = requests.post(
-      DISCORD_WEBHOOK_URL_REPORT,
-      data={"content": message},
-      files={"file": ("frogpilot_toggles.json", io.BytesIO(json.dumps(frogpilot_toggles, indent=2).encode("utf-8")), "application/json")},
-      timeout=10
-    )
-    main_response.raise_for_status()
-
-    mention_response = requests.post(
-      DISCORD_WEBHOOK_URL_REPORT,
-      json={"content": "<@&1198482895342411846>"},
-      timeout=10
-    )
-    mention_response.raise_for_status()
-
+    response = requests.post(f"{FROGPILOT_API}/discord/report", json=payload, headers={"Content-Type": "application/json", "User-Agent": "frogpilot-api/1.0"}, timeout=30)
+    response.raise_for_status()
+    print("Successfully sent error report!")
   except requests.exceptions.RequestException as exception:
-    print(f"Error sending Discord message: {exception}")
-  except Exception as exception:
-    print(f"Unexpected error: {exception}")
+    print(f"Error sending report: {exception}")
 
 
 def frogpilot_boot_functions(build_metadata, params):
   params_memory = Params(memory=True)
+
+  maps_selected = params.get("MapsSelected")
+  if maps_selected:
+    try:
+      data = json.loads(maps_selected)
+      if isinstance(data, dict):
+        new_items = []
+        for nation in data.get("nations", []):
+          new_items.append(f"nation.{nation}")
+        for state in data.get("states", []):
+          new_items.append(f"us_state.{state}")
+        new_items.sort()
+        params.put("MapsSelected", ",".join(new_items))
+    except (json.JSONDecodeError, TypeError, ValueError):
+      pass
 
   FrogPilotVariables()
   ThemeManager(params, params_memory, boot_run=True).update_active_theme(time_validated=system_time_valid(), frogpilot_toggles=get_frogpilot_toggles(), boot_run=True)
@@ -98,8 +104,7 @@ def install_frogpilot(build_metadata, params):
   for path in paths:
     path.mkdir(parents=True, exist_ok=True)
 
-  if params.get("FrogPilotDongleId") is None:
-    params.put("FrogPilotDongleId", "".join(random.choices(string.ascii_lowercase + string.digits, k=16)))
+  register_device(build_metadata, params)
 
   update_boot_logo(frogpilot=True)
 
@@ -108,6 +113,61 @@ def install_frogpilot(build_metadata, params):
     run_cmd(["sudo", "mount", "-o", "remount,rw", "/persist"], "Successfully remounted /persist as read-write", "Failed to remount /persist")
     run_cmd(["sudo", "python3", FROGS_GO_MOO_PATH], "Successfully ran frogsgomoo.py", "Failed to run frogsgomoo.py")
     run_cmd(["sudo", "mount", "-o", f"remount,{mount_options}", "/persist"], "Successfully restored /persist mount options", "Failed to restore /persist mount options")
+
+
+def register_device(build_metadata, params):
+  def valid_registration_response(data):
+    if not isinstance(data, dict) or data.get("ok") is not True:
+      return None
+
+    api_token = data.get("api_token")
+    frogpilot_dongle_id = data.get("frogpilot_dongle_id")
+    if not isinstance(api_token, str) or not api_token.startswith("fp_live."):
+      return None
+    if not isinstance(frogpilot_dongle_id, str) or len(frogpilot_dongle_id) != 16:
+      return None
+
+    return api_token, frogpilot_dongle_id
+
+  def register_thread():
+    while not is_url_pingable(FROGPILOT_API):
+      time.sleep(60)
+
+    _, _, public_key = get_key_pair()
+    stock_dongle_id = params.get("StockDongleId")
+    if not stock_dongle_id:
+      print("Device registration failed: missing StockDongleId")
+      return
+
+    payload = {
+      "build_metadata": dataclasses.asdict(build_metadata),
+      "device": HARDWARE.get_device_type(),
+      "device_public_key": public_key,
+      "dongle_id": stock_dongle_id,
+      "existing_api_token": params.get("FrogPilotApiToken") or "",
+      "os_version": HARDWARE.get_os_version(),
+      "stock_dongle_id": stock_dongle_id,
+    }
+
+    try:
+      response = requests.post(f"{FROGPILOT_API}/register", json=payload, headers={"Content-Type": "application/json", "User-Agent": "frogpilot-api/1.0"}, timeout=10)
+      response.raise_for_status()
+
+      registration = valid_registration_response(response.json())
+      if registration is None:
+        print("Device registration failed: invalid server response")
+        return
+
+      api_token, frogpilot_dongle_id = registration
+      print(f"Device registration successful: dongle_id={frogpilot_dongle_id[:8]}..., token=set")
+      params.put("FrogPilotApiToken", api_token)
+      params.put("FrogPilotDongleId", frogpilot_dongle_id)
+    except Exception as e:
+      print(f"Device registration failed: {e}")
+      if hasattr(e, 'response') and e.response is not None:
+        print(f"  Status: {e.response.status_code}, Body: {e.response.text[:200]}")
+
+  threading.Thread(target=register_thread, daemon=True).start()
 
 
 def uninstall_frogpilot():
@@ -124,7 +184,7 @@ def update_boot_logo(frogpilot=False, stock=False):
   elif stock:
     target_logo = Path(BASEDIR) / "frogpilot/assets/other_images/stock_bg.jpg"
   else:
-    print(f'Error: Must specify either "frogpilot=True" or "stock=True"')
+    print('Error: Must specify either "frogpilot=True" or "stock=True"')
     return
 
   if not target_logo.is_file():
@@ -138,12 +198,9 @@ def update_boot_logo(frogpilot=False, stock=False):
     run_cmd(["sudo", "mount", "-o", f"remount,{mount_options}", "/"], "Successfully restored / mount options", "Failed to restore / mount options")
 
 
-def update_maps(now, params, params_memory):
-  while not MAPD_PATH.exists():
-    time.sleep(60)
-
+def update_maps(now, params, params_memory, manual_update=False):
   maps_selected = params.get("MapsSelected")
-  if not maps_selected or not (maps_selected.get("nations") or maps_selected.get("states")):
+  if not maps_selected:
     return
 
   day = now.day
@@ -152,22 +209,49 @@ def update_maps(now, params, params_memory):
   schedule = params.get("PreferredSchedule")
 
   maps_downloaded = MAPS_PATH.exists()
-  if maps_downloaded and (schedule == 0 or (schedule == 1 and not is_sunday) or (schedule == 2 and not is_first)):
+  if maps_downloaded and (schedule == 0 or (schedule == 1 and not is_sunday) or (schedule == 2 and not is_first)) and not manual_update:
     return
 
   suffix = "th" if 11 <= day <= 13 else {1: "st", 2: "nd", 3: "rd"}.get(day % 10, "th")
   todays_date = now.strftime(f"%B {day}{suffix}, %Y")
 
-  if maps_downloaded and params.get("LastMapsUpdate") == todays_date:
+  if maps_downloaded and params.get("LastMapsUpdate") == todays_date and not manual_update:
     return
 
-  if params.get("OSMDownloadProgress") is None:
-    params_memory.put("OSMDownloadLocations", maps_selected)
+  pm = messaging.PubMaster(["mapdIn"])
+  sm = messaging.SubMaster(["mapdExtendedOut"])
 
-  while params.get("OSMDownloadProgress") is not None:
-    time.sleep(60)
+  time.sleep(1)
+
+  msg = messaging.new_message("mapdIn")
+  msg.mapdIn.type = 0
+  msg.mapdIn.str = maps_selected
+  pm.send("mapdIn", msg)
+
+  started = False
+  while True:
+    sm.update(1000)
+
+    if params_memory.get_bool("CancelDownloadMaps"):
+      msg = messaging.new_message("mapdIn")
+      msg.mapdIn.type = 27
+      pm.send("mapdIn", msg)
+
+      params_memory.remove("CancelDownloadMaps")
+      params_memory.remove("DownloadMaps")
+      return
+
+    if sm.updated["mapdExtendedOut"]:
+      progress = sm["mapdExtendedOut"].downloadProgress
+
+      if progress.active:
+        started = True
+
+      if not progress.active and started:
+        break
 
   params.put("LastMapsUpdate", todays_date)
+  params_memory.remove("DownloadMaps")
 
 
 def update_openpilot(thread_manager, params):

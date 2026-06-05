@@ -4,6 +4,30 @@ bool isUserCreatedTheme(const QString &themeName) {
   return themeName.endsWith("-user_created");
 }
 
+QString themeAssetKey(const QString &input) {
+  QString output = input;
+  bool userCreated = output.contains("ðŸŒŸ") || output.contains("🌟");
+  output.replace(" - by: ", "~");
+  int tilde = output.indexOf("~");
+  if (tilde >= 0) {
+    output = output.left(tilde).toLower() + "~" + output.mid(tilde + 1);
+  } else {
+    output = output.toLower();
+  }
+  output.remove("(").remove(")").remove("'").remove(".");
+  output.replace(" ", input.contains("(") ? "-" : "_");
+  output.replace("_ðŸŒŸ", "");
+  output.replace("_🌟", "");
+  output.replace("-🌟", "");
+  output.remove("ðŸŒŸ").remove("🌟");
+  output = output.trimmed();
+  if (userCreated) {
+    output += "-user_created";
+  }
+
+  return output;
+}
+
 void updateAssetParam(const QString &assetParam, Params &params, const QString &value, bool add) {
   QStringList assets = QString::fromStdString(params.get(assetParam.toStdString())).split(",", QString::SkipEmptyParts);
   if (add) {
@@ -66,17 +90,7 @@ void deleteThemeAsset(QDir &directory, const QString &subFolder, const QString &
 }
 
 void downloadThemeAsset(const QString &input, const std::string &paramKey, const QString &assetParam, Params &params, Params &params_memory) {
-  QString output = input;
-  int tilde = output.indexOf("~");
-  if (tilde >= 0) {
-    output = output.left(tilde).toLower() + "~" + output.mid(tilde + 1);
-  } else {
-    output = output.toLower();
-  }
-  output.remove("(").remove(")");
-  output.replace(" ", input.contains("(") ? "-" : "_");
-
-  params_memory.put(paramKey, output.toStdString());
+  params_memory.put(paramKey, themeAssetKey(input).toStdString());
 }
 
 QStringList getHolidayThemes() {
@@ -140,7 +154,7 @@ QStringList getThemeList(const bool &randomThemes, const QDir &themePacksDirecto
     if (userCreated) {
       displayName = parts.join(" ");
     } else {
-      displayName = (parts.size() <= 1 || useFiles) ? parts.join(" ") : QString("%1 (%2)").arg(parts[0], parts.mid(1).join(" "));
+      displayName = (parts.size() <= 1 || useFiles || !baseName.contains("-")) ? parts.join(" ") : QString("%1 (%2)").arg(parts[0], parts.mid(1).join(" "));
     }
 
     if (userCreated) {
@@ -263,7 +277,7 @@ FrogPilotThemesPanel::FrogPilotThemesPanel(FrogPilotSettingsWindow *parent, bool
 
             params_memory.putBool("CancelThemeDownload", true);
 
-            QTimer::singleShot(2500, [this]() {
+            QTimer::singleShot(2500, this, [this]() {
               cancellingDownload = false;
               colorDownloading = false;
               themeDownloading = false;
@@ -315,7 +329,7 @@ FrogPilotThemesPanel::FrogPilotThemesPanel(FrogPilotSettingsWindow *parent, bool
 
             params_memory.putBool("CancelThemeDownload", true);
 
-            QTimer::singleShot(2500, [this]() {
+            QTimer::singleShot(2500, this, [this]() {
               cancellingDownload = false;
               distanceIconDownloading = false;
               themeDownloading = false;
@@ -367,7 +381,7 @@ FrogPilotThemesPanel::FrogPilotThemesPanel(FrogPilotSettingsWindow *parent, bool
 
             params_memory.putBool("CancelThemeDownload", true);
 
-            QTimer::singleShot(2500, [this]() {
+            QTimer::singleShot(2500, this, [this]() {
               cancellingDownload = false;
               iconDownloading = false;
               themeDownloading = false;
@@ -419,7 +433,7 @@ FrogPilotThemesPanel::FrogPilotThemesPanel(FrogPilotSettingsWindow *parent, bool
 
             params_memory.putBool("CancelThemeDownload", true);
 
-            QTimer::singleShot(2500, [this]() {
+            QTimer::singleShot(2500, this, [this]() {
               cancellingDownload = false;
               signalDownloading = false;
               themeDownloading = false;
@@ -471,7 +485,7 @@ FrogPilotThemesPanel::FrogPilotThemesPanel(FrogPilotSettingsWindow *parent, bool
 
             params_memory.putBool("CancelThemeDownload", true);
 
-            QTimer::singleShot(2500, [this]() {
+            QTimer::singleShot(2500, this, [this]() {
               cancellingDownload = false;
               soundDownloading = false;
               themeDownloading = false;
@@ -523,7 +537,7 @@ FrogPilotThemesPanel::FrogPilotThemesPanel(FrogPilotSettingsWindow *parent, bool
 
             params_memory.putBool("CancelThemeDownload", true);
 
-            QTimer::singleShot(2500, [this]() {
+            QTimer::singleShot(2500, this, [this]() {
               cancellingDownload = false;
               wheelDownloading = false;
               themeDownloading = false;
@@ -772,7 +786,7 @@ void FrogPilotThemesPanel::updateState(const UIState &s, const FrogPilotUIState 
     if (progress == "Downloaded!" || downloadFailed) {
       finalizingDownload = true;
 
-      QTimer::singleShot(2500, [this]() {
+      QTimer::singleShot(2500, this, [this]() {
         colorDownloading = false;
         distanceIconDownloading = false;
         finalizingDownload = false;

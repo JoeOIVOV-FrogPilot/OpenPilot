@@ -32,7 +32,7 @@ private:
 
   bool open_segment();
 
-  static QImage blend_frames(const QImage &a, const QImage &b);
+  const QImage &blend_frames(const QImage &a, const QImage &b);
 
   void worker_loop();
 
@@ -44,6 +44,9 @@ private:
   const int width;
 
   uint64_t segment_start_ns = 0;
+
+  QImage blend_buf;
+  bool size_warned = false;
 
   std::atomic<bool> recording{false};
 

@@ -25,7 +25,6 @@ private:
   bool forceOpenDescriptions;
   bool mapboxPublicKeySet;
   bool mapboxSecretKeySet;
-  bool updatingLimits;
 
   FrogPilotButtonsControl *publicMapboxKeyControl;
   FrogPilotButtonsControl *secretMapboxKeyControl;

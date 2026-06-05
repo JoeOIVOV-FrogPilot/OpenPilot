@@ -1257,6 +1257,12 @@ struct LongitudinalPlan @0xe00b5b3eba12876c {
 
   solverExecutionTime @35 :Float32;
 
+  # lead trajectories the MPC solved against (13 points at T_IDXS)
+  leadTrajectoryX0 @40 :List(Float32);
+  leadTrajectoryV0 @41 :List(Float32);
+  leadTrajectoryX1 @42 :List(Float32);
+  leadTrajectoryV1 @43 :List(Float32);
+
   enum LongitudinalPlanSource {
     cruise @0;
     lead0 @1;
@@ -2642,9 +2648,9 @@ struct Event {
     customReserved14 @140 :Custom.CustomReserved14;
     customReserved15 @141 :Custom.CustomReserved15;
     customReserved16 @142 :Custom.CustomReserved16;
-    customReserved17 @143 :Custom.CustomReserved17;
-    customReserved18 @144 :Custom.CustomReserved18;
-    customReserved19 @145 :Custom.CustomReserved19;
+    mapdExtendedOut @143 :Custom.MapdExtendedOut;
+    mapdIn @144 :Custom.MapdIn;
+    mapdOut @145 :Custom.MapdOut;
 
     # *********** legacy + deprecated ***********
     model @9 :Legacy.ModelData; # TODO: rename modelV2 and mark this as deprecated

@@ -33,6 +33,7 @@ class FrogPilotPlanner:
     self.frogpilot_weather = WeatherChecker(self)
 
     self.driving_in_curve = False
+    self.gps_valid = False
     self.lateral_check = False
     self.model_stopped = False
     self.road_curvature_detected = False
@@ -74,7 +75,7 @@ class FrogPilotPlanner:
 
     self.driving_in_curve = abs(self.lateral_acceleration) >= MINIMUM_LATERAL_ACCELERATION
 
-    self.frogpilot_events.update(v_cruise, sm, frogpilot_toggles)
+    self.frogpilot_events.update(long_control_active, v_cruise, sm, frogpilot_toggles)
 
     self.frogpilot_following.update(long_control_active, v_ego, sm, frogpilot_toggles)
 
@@ -84,6 +85,7 @@ class FrogPilotPlanner:
       "longitude": gps_location.longitude,
       "bearing": gps_location.bearingDeg,
     }
+    self.gps_valid = self.gps_position["latitude"] != 0 or self.gps_position["longitude"] != 0
     self.params_memory.put("LastGPSPosition", json.dumps(self.gps_position))
 
     if v_ego >= frogpilot_toggles.minimum_lane_change_speed:
@@ -113,17 +115,21 @@ class FrogPilotPlanner:
 
     self.v_cruise = self.frogpilot_vcruise.update(long_control_active, now, time_validated, v_cruise, v_ego, sm, frogpilot_toggles)
 
-    if self.gps_position and time_validated and frogpilot_toggles.weather_presets:
+    if self.gps_valid and time_validated and frogpilot_toggles.weather_presets:
       self.frogpilot_weather.update_weather(now, frogpilot_toggles)
     else:
       self.frogpilot_weather.weather_id = 0
 
   def update_lead_status(self):
+    closing_lead = self.lead_one.status
+    closing_lead &= self.lead_one.vRel < 0
+    closing_lead &= self.lead_one.dRel + (self.lead_one.vRel * PLANNER_TIME) < self.model_length + STOP_DISTANCE
+
     following_lead = self.lead_one.status
     following_lead &= self.lead_one.dRel < self.model_length + STOP_DISTANCE
 
     self.tracking_lead_filter.update(following_lead)
-    return self.tracking_lead_filter.x >= THRESHOLD
+    return closing_lead or self.tracking_lead_filter.x >= THRESHOLD
 
   def publish(self, theme_updated, sm, pm, frogpilot_toggles):
     frogpilot_plan_send = messaging.new_message("frogpilotPlan")
@@ -131,10 +137,10 @@ class FrogPilotPlanner:
     frogpilotPlan = frogpilot_plan_send.frogpilotPlan
 
     frogpilotPlan.accelerationJerk = float(A_CHANGE_COST * self.frogpilot_following.acceleration_jerk)
-    frogpilotPlan.dangerFactor = float(self.frogpilot_following.danger_factor)
     frogpilotPlan.dangerJerk = float(DANGER_ZONE_COST * self.frogpilot_following.danger_jerk)
     frogpilotPlan.speedJerk = float(J_EGO_COST * self.frogpilot_following.speed_jerk)
     frogpilotPlan.tFollow = float(self.frogpilot_following.t_follow)
+    frogpilotPlan.trackingLead = self.tracking_lead
 
     frogpilotPlan.cscControllingSpeed = self.frogpilot_vcruise.csc_controlling_speed
     frogpilotPlan.cscSpeed = float(self.frogpilot_vcruise.csc_target)

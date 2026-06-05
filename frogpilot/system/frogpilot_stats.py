@@ -1,228 +1,286 @@
-import json
-import os
-import random
+import math
 import requests
-
-from collections import Counter
-from datetime import datetime, timezone
-from influxdb_client import InfluxDBClient, Point
-from influxdb_client.client.write_api import SYNCHRONOUS
+import sqlite3
 
 from cereal import car, custom
-from openpilot.system.hardware import HARDWARE
-from openpilot.system.version import get_build_metadata
 
-from openpilot.frogpilot.common.frogpilot_download_utilities import github_rate_limited
-from openpilot.frogpilot.common.frogpilot_utilities import clean_model_name, is_url_pingable
+from openpilot.frogpilot.common import frogpilot_utilities, frogpilot_variables
 
-BUCKET = os.environ.get("STATS_BUCKET", "")
-ORG_ID = os.environ.get("STATS_ORG_ID", "")
-TOKEN = os.environ.get("STATS_TOKEN", "")
-STATS_URL = os.environ.get("STATS_URL", "")
 
-BASE_URL = "https://nominatim.openstreetmap.org"
-GITHUB_API_URL = "https://api.github.com/repos/FrogAi/FrogPilot/commits"
+STATS_PAYLOAD_SCHEMA_VERSION = 1
 
-MINIMUM_POPULATION = 100_000
+LOCATION_UNAVAILABLE = ("N/A", "N/A", "N/A")
 
-TRACKED_BRANCHES = ["FrogPilot", "FrogPilot-Staging", "FrogPilot-Testing"]
+COUNTRY_AMBIGUITY_DISTANCE = 5000
+COUNTRY_AMBIGUITY_MARGIN = 1000
+MAX_NEAREST_CITY_DISTANCE = 100000
+MIN_CITY_POPULATION = 100000
+NEARBY_MAJOR_CITY_DISTANCE = 50000
 
-def get_branch_commits(now):
-  commits = []
 
-  with requests.Session() as session:
-    session.headers.update({
-      "Accept": "application/vnd.github.v3+json",
-      "Accept-Language": "en",
-      "User-Agent": "frogpilot-branch-commits-checker/1.0 (https://github.com/FrogAi/FrogPilot)"
-     })
+def format_location_name(name):
+  return "N/A" if name in (None, "", "00") else name
 
-    if github_rate_limited(session):
-      print("Skipping commit check due to rate limits.")
-      return []
 
-    for branch in TRACKED_BRANCHES:
-      try:
-        response = session.get(f"{GITHUB_API_URL}/{branch}", timeout=10)
-        response.raise_for_status()
+def get_city_candidates(connection, latitude, longitude):
+  sql = """
+    SELECT name, latitude, longitude, country_code, admin1_code, population
+    FROM (
+      SELECT
+        name,
+        latitude,
+        longitude,
+        country_code,
+        admin1_code,
+        population,
+        latitude - :latitude AS latitude_delta,
+        CASE
+          WHEN ABS(longitude - :longitude) > 180 THEN 360 - ABS(longitude - :longitude)
+          ELSE ABS(longitude - :longitude)
+        END AS longitude_delta
+      FROM cities
+    )
+    ORDER BY latitude_delta * latitude_delta + longitude_delta * longitude_delta * :longitude_weight ASC
+    LIMIT :limit
+  """
 
-        sha = response.json().get("sha")
-        if sha:
-          commits.append(Point("branch_commits").field("commit", sha).tag("branch", branch).time(now))
-      except requests.exceptions.RequestException as exception:
-        print(f"Failed to get commit for {branch}: {exception}")
+  connection.row_factory = sqlite3.Row
+  return connection.execute(
+    sql,
+    {
+      "latitude": latitude,
+      "longitude": longitude,
+      "longitude_weight": max(math.cos(math.radians(latitude)) ** 2, 0.01),
+      "limit": 250,
+    },
+  ).fetchall()
 
-  return commits
 
-def get_city_center(latitude, longitude):
+def get_fallback_city(connection, country_code, admin1_code):
+  return connection.execute(
+    """
+    SELECT city_fallbacks.name, admin1_regions.admin1_name, countries.country_name
+    FROM city_fallbacks
+    JOIN countries
+      ON countries.country_code = city_fallbacks.country_code
+    LEFT JOIN admin1_regions
+      ON admin1_regions.country_code = city_fallbacks.country_code
+      AND admin1_regions.admin1_code = city_fallbacks.fallback_admin1_code
+    WHERE city_fallbacks.country_code = :country_code
+      AND city_fallbacks.admin1_code = :admin1_code
+    LIMIT 1
+    """,
+    {
+      "country_code": country_code,
+      "admin1_code": admin1_code,
+    },
+  ).fetchone()
+
+
+def get_location_names(connection, country_code, admin1_code):
+  location = connection.execute(
+    """
+    SELECT admin1_regions.admin1_name, countries.country_name
+    FROM countries
+    LEFT JOIN admin1_regions
+      ON admin1_regions.country_code = countries.country_code
+      AND admin1_regions.admin1_code = :admin1_code
+    WHERE countries.country_code = :country_code
+    LIMIT 1
+    """,
+    {
+      "country_code": country_code,
+      "admin1_code": admin1_code,
+    },
+  ).fetchone()
+
+  if location is None:
+    return "N/A", "N/A"
+
+  return format_location_name(location["admin1_name"]), location["country_name"] or "N/A"
+
+
+def get_nearby_major_city(connection, latitude, longitude, best_city):
+  nearby_major_cities = connection.execute(
+    """
+    SELECT name, latitude, longitude, country_code, admin1_code, population
+    FROM cities
+    WHERE country_code = :country_code
+      AND admin1_code = :admin1_code
+      AND population >= :min_city_population
+    """,
+    {
+      "country_code": best_city["country_code"],
+      "admin1_code": best_city["admin1_code"],
+      "min_city_population": MIN_CITY_POPULATION,
+    },
+  ).fetchall()
+  if not nearby_major_cities:
+    return None
+
+  nearby_major_city = min(
+    nearby_major_cities,
+    key=lambda city: frogpilot_utilities.calculate_distance_to_point(latitude, longitude, city["latitude"], city["longitude"]),
+  )
+  distance = frogpilot_utilities.calculate_distance_to_point(latitude, longitude, nearby_major_city["latitude"], nearby_major_city["longitude"])
+  return nearby_major_city if distance <= NEARBY_MAJOR_CITY_DISTANCE else None
+
+
+def is_country_ambiguous(ranked_candidates):
+  best_distance, _, best_city = ranked_candidates[0]
+
+  for distance, _, city in ranked_candidates[1:]:
+    if distance > COUNTRY_AMBIGUITY_DISTANCE or distance - best_distance > COUNTRY_AMBIGUITY_MARGIN:
+      break
+    if city["country_code"] != best_city["country_code"]:
+      return True
+
+  return False
+
+
+def get_city(gps_position):
+  coordinates = frogpilot_utilities.parse_gps_position(gps_position)
+  if coordinates is None:
+    return LOCATION_UNAVAILABLE
+
+  latitude, longitude = coordinates
+  if latitude == 0 and longitude == 0:
+    return LOCATION_UNAVAILABLE
+
   try:
-    with requests.Session() as session:
-      session.headers.update({
-        "Accept-Language": "en",
-        "User-Agent": "frogpilot-city-center-checker/1.0 (https://github.com/FrogAi/FrogPilot)"
-      })
+    city_lookup_path = frogpilot_variables.CITY_LOOKUP_PATH
+    if not city_lookup_path.is_file():
+      return LOCATION_UNAVAILABLE
 
-      location_params = {
-        "addressdetails": 1, "format": "jsonv2",
-        "lat": latitude, "lon": longitude, "zoom": 13
-      }
-      response = session.get(f"{BASE_URL}/reverse", params=location_params, timeout=10)
-      response.raise_for_status()
-      address = response.json().get("address", {})
+    connection = sqlite3.connect(f"{city_lookup_path.resolve().as_uri()}?mode=ro", uri=True)
+    try:
+      candidates = get_city_candidates(connection, latitude, longitude)
+      if not candidates:
+        return LOCATION_UNAVAILABLE
 
-      city_name = address.get("city") or address.get("town") or address.get("village") or address.get("hamlet")
-      state_name = address.get("province") or address.get("region") or address.get("state") or address.get("state_district") or "N/A"
-      country_name = address.get("country", "N/A")
-      country_code = (address.get("country_code") or "").lower()
+      ranked_candidates = sorted(
+        (
+          frogpilot_utilities.calculate_distance_to_point(latitude, longitude, city["latitude"], city["longitude"]),
+          index,
+          city,
+        )
+        for index, city in enumerate(candidates)
+      )
+      if is_country_ambiguous(ranked_candidates):
+        return LOCATION_UNAVAILABLE
 
-      if city_name:
-        city_query_params = {
-          "q": f"{city_name}, {state_name}, {country_name}",
-          "addressdetails": 1, "extratags": 1,
-          "format": "jsonv2", "limit": 1
-        }
-        response = session.get(f"{BASE_URL}/search", params=city_query_params, timeout=10)
-        response.raise_for_status()
-        city_results = response.json()
+      best_city = ranked_candidates[0][2]
+      if ranked_candidates[0][0] > MAX_NEAREST_CITY_DISTANCE:
+        return LOCATION_UNAVAILABLE
 
-        if city_results:
-          city_result = city_results[0]
-          population = int(str(city_result.get("extratags", {}).get("population", "0")).replace(",", "").replace(" ", "").split(";")[0])
+      if best_city["population"] < MIN_CITY_POPULATION:
+        nearby_major_city = get_nearby_major_city(connection, latitude, longitude, best_city)
+        if nearby_major_city is not None:
+          admin1_name, country_name = get_location_names(connection, nearby_major_city["country_code"], nearby_major_city["admin1_code"])
+          return nearby_major_city["name"], admin1_name, country_name
 
-          if population >= MINIMUM_POPULATION:
-            city_address = city_result.get("address", {})
-            selected_city_name = city_address.get("city") or city_address.get("town") or city_name
-            return (float(city_result["lat"]), float(city_result["lon"]), selected_city_name, state_name, country_name)
+        fallback_city = get_fallback_city(connection, best_city["country_code"], best_city["admin1_code"])
+        if fallback_city is None:
+          return LOCATION_UNAVAILABLE
 
-      capital_query = (f"{state_name} state capital" if country_code == "us" else f"capital of {state_name}, {country_name}")
-      capital_query_params = {
-        "q": capital_query,
-        "addressdetails": 1, "extratags": 1,
-        "format": "jsonv2", "limit": 5
-      }
-      response = session.get(f"{BASE_URL}/search", params=capital_query_params, timeout=10)
-      response.raise_for_status()
-      capital_results = response.json()
+        return fallback_city["name"], format_location_name(fallback_city["admin1_name"]), fallback_city["country_name"] or "N/A"
 
-      selected_capital = None
-      for capital_result in capital_results:
-        if capital_result is None:
-          continue
+      admin1_name, country_name = get_location_names(connection, best_city["country_code"], best_city["admin1_code"])
+      return best_city["name"], admin1_name, country_name
+    finally:
+      connection.close()
+  except (sqlite3.Error, OSError, ValueError) as error:
+    print(f"Failed to get city: {error}")
+    return LOCATION_UNAVAILABLE
 
-        capital_address = capital_result.get("address", {})
-        capital_state = (capital_address.get("province") or capital_address.get("region") or capital_address.get("state") or capital_address.get("state_district"))
-        capital_country = capital_address.get("country")
 
-        if capital_country != country_name:
-          continue
-        if state_name != "N/A" and capital_state != state_name:
-          continue
+def get_car_params(params):
+  msg_bytes = params.get("CarParamsPersistent")
+  if not msg_bytes:
+    return {}
 
-        is_tagged_capital = (capital_result.get("extratags") or {}).get("capital") in ("administrative", "state", "yes")
-        if is_tagged_capital:
-          selected_capital = capital_result
-          break
+  with car.CarParams.from_bytes(msg_bytes) as CP:
+    car_params = CP.to_dict()
 
-        if selected_capital is None:
-          selected_capital = capital_result
+  car_params.pop("carFw", None)
+  car_params.pop("carVin", None)
+  return car_params
 
-      if selected_capital:
-        selected_capital_address = selected_capital.get("address", {})
-        selected_city_name = (selected_capital_address.get("city") or selected_capital_address.get("town") or selected_capital.get("display_name", "").split(",")[0])
-        return (float(selected_capital["lat"]), float(selected_capital["lon"]), selected_city_name, state_name, country_name)
 
-  except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
-    pass
+def get_frogpilot_car_params(params):
+  msg_bytes = params.get("FrogPilotCarParamsPersistent")
+  if not msg_bytes:
+    return {}
 
-  return (0.0, 0.0, "N/A", "N/A", "N/A")
+  with custom.FrogPilotCarParams.from_bytes(msg_bytes) as FPCP:
+    return FPCP.to_dict()
 
-def send_stats(params, frogpilot_toggles):
-  if not is_url_pingable(os.environ.get("STATS_URL", "")):
+
+def get_model_scores(params):
+  model_scores = []
+
+  for model_name, model_data in sorted((params.get("ModelDrivesAndScores") or {}).items()):
+    drives = int(model_data.get("Drives", 0) or 0)
+    if drives <= 0:
+      continue
+
+    model_scores.append({
+      "drives": drives,
+      "model_name": frogpilot_utilities.clean_model_name(model_name),
+      "score": int(model_data.get("Score", 0) or 0),
+    })
+
+  return model_scores
+
+
+def send_stats(gps_position, params, frogpilot_toggles):
+  if not frogpilot_toggles.frogpilot_telemetry:
     return
 
-  build_metadata = get_build_metadata()
+  if frogpilot_toggles.car_make == "mock":
+    return
 
-  car_params = "{}"
-  msg_bytes = params.get("CarParamsPersistent")
-  if msg_bytes:
-    with car.CarParams.from_bytes(msg_bytes) as CP:
-      cp_dict = CP.to_dict()
-      cp_dict.pop("carFw", None)
-      cp_dict.pop("carVin", None)
-      car_params = json.dumps(cp_dict)
+  api_info = frogpilot_utilities.get_frogpilot_api_info()
+  if not api_info.api_token or not api_info.dongle_id:
+    return
 
-  frogpilot_car_params = "{}"
-  frogpilot_msg_bytes = params.get("FrogPilotCarParamsPersistent")
-  if frogpilot_msg_bytes:
-    with custom.FrogPilotCarParams.from_bytes(frogpilot_msg_bytes) as FPCP:
-      fpcp_dict = FPCP.to_dict()
-      fpcp_dict.pop("carFw", None)
-      fpcp_dict.pop("carVin", None)
-      frogpilot_car_params = json.dumps(fpcp_dict)
+  city, state, country = LOCATION_UNAVAILABLE
+  if isinstance(gps_position, dict):
+    city, state, country = get_city(gps_position)
 
-  dongle_id = params.get("FrogPilotDongleId")
-  frogpilot_stats = params.get("FrogPilotStats")
+  using_default_model = (params.get("DrivingModel") or "").endswith("_default")
 
-  location = json.loads(params.get("LastGPSPosition") or "{}") or {}
-  original_latitude = location.get("latitude", 0.0)
-  original_longitude = location.get("longitude", 0.0)
-  latitude, longitude, city, state, country = get_city_center(original_latitude, original_longitude)
+  payload = {
+    "api_token": api_info.api_token,
+    "build_metadata": api_info.build_metadata,
+    "device": api_info.device_type,
+    "frogpilot_dongle_id": api_info.dongle_id,
+    "model_scores": get_model_scores(params),
+    "os_version": api_info.os_version,
+    "stats_schema_version": STATS_PAYLOAD_SCHEMA_VERSION,
+    "user_stats": {
+      "calibrated_lateral_acceleration": params.get("CalibratedLateralAcceleration"),
+      "car_params": get_car_params(params),
+      "city": city,
+      "country": country,
+      "device": api_info.device_type,
+      "frogpilot_car_params": get_frogpilot_car_params(params),
+      "frogpilot_dongle_id": api_info.dongle_id,
+      "frogpilot_stats": params.get("FrogPilotStats") or {},
+      "state": state,
+      "toggles": vars(frogpilot_toggles),
+      "using_default_model": using_default_model,
+    },
+  }
 
-  now = datetime.now(timezone.utc)
-
-  theme_attributes = sorted(["color_scheme", "distance_icons", "icon_pack", "signal_icons", "sound_pack"])
-  theme_counts = Counter(getattr(frogpilot_toggles, attribute).replace("-animated", "") for attribute in theme_attributes)
-  winners = [theme for theme, count in theme_counts.items() if count == max(theme_counts.values(), default=0)]
-  if len(winners) > 1 and "stock" in winners:
-    winners.remove("stock")
-  selected_theme = random.choice(winners).replace("-user_created", "").replace("_", " ") if winners else "stock"
-
-  user_point = (
-    Point("user_stats")
-    .field("calibrated_lateral_acceleration", params.get("CalibratedLateralAcceleration"))
-    .field("calibration_progress", params.get("CalibrationProgress"))
-    .field("car_params", car_params)
-    .field("city", city)
-    .field("commit", build_metadata.openpilot.git_commit)
-    .field("country", country)
-    .field("device", HARDWARE.get_device_type())
-    .field("event", 1)
-    .field("frogpilot_car_params", frogpilot_car_params)
-    .field("frogpilot_stats", json.dumps(frogpilot_stats))
-    .field("latitude", latitude)
-    .field("longitude", longitude)
-    .field("state", state)
-    .field("stats", json.dumps(frogpilot_stats))  # Remove in the future
-    .field("theme", selected_theme.title())
-    .field("toggles", json.dumps(frogpilot_toggles.__dict__))
-    .field("tuning_level", params.get("TuningLevel") + 1 if params.get_bool("TuningLevelConfirmed") else 0)
-    .field("using_default_model", params.get("DrivingModel").endswith("_default"))
-    .tag("branch", build_metadata.channel)
-    .tag("dongle_id", dongle_id)
-    .time(now)
-  )
-
-  model_points = []
-  for model_name, data in sorted(params.get("ModelDrivesAndScores").items()):
-    drives = data.get("Drives", 0)
-    score = data.get("Score", 0)
-
-    if drives > 0:
-      point = (
-        Point("model_scores")
-        .field("drives", int(drives))
-        .field("score", int(score))
-        .tag("dongle_id", dongle_id)
-        .tag("model_name", clean_model_name(model_name))
-        .time(now)
-      )
-      model_points.append(point)
-
-  all_points = get_branch_commits(now) + model_points + [user_point]
-
-  client = InfluxDBClient(org=ORG_ID, timeout=60000, token=TOKEN, url=STATS_URL)
   try:
-    client.write_api(write_options=SYNCHRONOUS).write(bucket=BUCKET, record=all_points)
+    response = requests.post(
+      f"{frogpilot_variables.FROGPILOT_API}/stats",
+      json=payload,
+      headers={"Content-Type": "application/json", "User-Agent": "frogpilot-api/1.0"},
+      timeout=30,
+    )
+    response.raise_for_status()
     print("Successfully sent FrogPilot stats!")
-  except Exception as error:
+  except requests.exceptions.RequestException as error:
     print(f"Failed to send stats: {error}")

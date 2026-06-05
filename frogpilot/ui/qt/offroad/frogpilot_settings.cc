@@ -249,6 +249,8 @@ void FrogPilotSettingsWindow::updateTuningLevel() {
 }
 
 void FrogPilotSettingsWindow::showEvent(QShowEvent *event) {
+  updateTuningLevel();
+
   static bool alertShown = false;
 
   QString className = this->metaObject()->className();
@@ -464,7 +466,7 @@ void FrogPilotSettingsWindow::updateVariables() {
     hasAutoTune = LTP.getUseParams();
   }
 
-  drivingPanelButtons->setVisibleButton(0, tuningLevel >= frogpilotToggleLevels.value("DrivingModel").toDouble());
+  drivingPanelButtons->setVisibleButton(0, false);
   drivingPanelButtons->setVisibleButton(1, hasOpenpilotLongitudinal);
 
   systemPanelButtons->setVisibleButton(1, tuningLevel >= frogpilotToggleLevels.value("DeviceManagement").toDouble() || tuningLevel >= frogpilotToggleLevels.value("ScreenManagement").toDouble());
