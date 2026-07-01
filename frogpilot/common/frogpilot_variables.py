@@ -232,7 +232,7 @@ class FrogPilotVariables:
     self.release_branch = branch == "FrogPilot"
     self.staging_branch = branch == "FrogPilot-Staging"
     self.testing_branch = branch == "FrogPilot-Testing"
-    self.vetting_branch = branch == "FrogPilot-Vetting"
+    self.vetting_branch = branch == "FrogPilot-Vetting" or branch == "FrogPilot-Vetting2"
 
     self.frogs_go_moo = FROGS_GO_MOO_PATH.is_file()
     toggle.block_user = (self.development_branch or branch == "MAKE-PRS-HERE" or self.vetting_branch) and not self.frogs_go_moo
